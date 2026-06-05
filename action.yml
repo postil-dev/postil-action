@@ -1,0 +1,155 @@
+name: Postil Review
+description: Low-noise pull request review gate powered by the Postil reviewer CLI.
+author: Postil
+
+branding:
+  icon: git-pull-request
+  color: green
+
+inputs:
+  api-key:
+    description: OpenRouter API key used by the reviewer model.
+    required: true
+  github-token:
+    description: GitHub token used to read pull request diffs and post review output.
+    required: false
+    default: ${{ github.token }}
+  reviewer-ref:
+    description: Full postil-dev/postil-reviewer commit SHA to install and run.
+    required: false
+    default: d51705920a8fca2717a7b9c1bb224e7cdede661a
+  model:
+    description: Primary OpenRouter model name.
+    required: false
+    default: deepseek/deepseek-v4-pro
+  model-cascade:
+    description: Optional comma-separated fallback model list.
+    required: false
+  fail-on:
+    description: "Exit 1 when a finding meets this severity: info, warn, or error."
+    required: false
+    default: error
+  no-inline:
+    description: Skip inline PR review comments.
+    required: false
+    default: "false"
+  config-path:
+    description: Optional local Postil config path. Leave empty to let the reviewer read repo config from GitHub.
+    required: false
+  repo:
+    description: "Repository in owner/name form. Defaults to GITHUB_REPOSITORY or pull_request event data."
+    required: false
+  pr:
+    description: Pull request number. Defaults to pull_request event data.
+    required: false
+  sha:
+    description: Pull request head SHA. Defaults to pull_request event data.
+    required: false
+  github-api-url:
+    description: Override GitHub API URL.
+    required: false
+  openrouter-api-url:
+    description: Override OpenRouter API URL.
+    required: false
+  diff-limit:
+    description: Optional maximum diff bytes for the reviewer.
+    required: false
+  check-name:
+    description: Optional GitHub check name override.
+    required: false
+  output-json:
+    description: Optional path for writing the structured review envelope.
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - name: Validate reviewer ref
+      shell: bash
+      env:
+        REVIEWER_REF: ${{ inputs.reviewer-ref }}
+      run: |
+        set -euo pipefail
+        if [[ ! "$REVIEWER_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          echo "::error::reviewer-ref must be a full 40-character postil-dev/postil-reviewer commit SHA."
+          exit 1
+        fi
+
+    - name: Install Rust toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v cargo >/dev/null 2>&1; then
+          exit 0
+        fi
+        curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail https://sh.rustup.rs |
+          sh -s -- --profile minimal --default-toolchain stable -y
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+    - name: Install Postil reviewer
+      shell: bash
+      env:
+        REVIEWER_REF: ${{ inputs.reviewer-ref }}
+      run: |
+        set -euo pipefail
+        cargo install \
+          --git https://github.com/postil-dev/postil-reviewer \
+          --rev "$REVIEWER_REF" \
+          --locked \
+          --force
+
+    - name: Run Postil review
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        OPENROUTER_API_KEY: ${{ inputs.api-key }}
+        REVIEW_MODEL: ${{ inputs.model }}
+        REVIEW_MODEL_CASCADE: ${{ inputs.model-cascade }}
+        POSTIL_FAIL_ON: ${{ inputs.fail-on }}
+        POSTIL_GITHUB_API_URL: ${{ inputs.github-api-url }}
+        POSTIL_OPENROUTER_API_URL: ${{ inputs.openrouter-api-url }}
+        POSTIL_CHECK_NAME: ${{ inputs.check-name }}
+        INPUT_CONFIG_PATH: ${{ inputs.config-path }}
+        INPUT_REPO: ${{ inputs.repo }}
+        INPUT_PR: ${{ inputs.pr }}
+        INPUT_SHA: ${{ inputs.sha }}
+        INPUT_NO_INLINE: ${{ inputs.no-inline }}
+        INPUT_DIFF_LIMIT: ${{ inputs.diff-limit }}
+        INPUT_OUTPUT_JSON: ${{ inputs.output-json }}
+      run: |
+        set -euo pipefail
+
+        args=(review --fail-on "$POSTIL_FAIL_ON")
+
+        if [[ -n "$INPUT_CONFIG_PATH" ]]; then
+          args+=(--config "$INPUT_CONFIG_PATH")
+        fi
+        if [[ -n "$INPUT_REPO" ]]; then
+          args+=(--repo "$INPUT_REPO")
+        fi
+        if [[ -n "$INPUT_PR" ]]; then
+          args+=(--pr "$INPUT_PR")
+        fi
+        if [[ -n "$INPUT_SHA" ]]; then
+          args+=(--sha "$INPUT_SHA")
+        fi
+        if [[ -n "$INPUT_DIFF_LIMIT" ]]; then
+          args+=(--diff-limit "$INPUT_DIFF_LIMIT")
+        fi
+        if [[ -n "$INPUT_OUTPUT_JSON" ]]; then
+          args+=(--output-json "$INPUT_OUTPUT_JSON")
+        fi
+
+        case "$INPUT_NO_INLINE" in
+          true)
+            args+=(--no-inline)
+            ;;
+          false|"")
+            ;;
+          *)
+            echo "::error::no-inline must be 'true' or 'false'."
+            exit 1
+            ;;
+        esac
+
+        postil "${args[@]}"
