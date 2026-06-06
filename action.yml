@@ -1,5 +1,5 @@
 name: Postil Review
-description: Low-noise pull request review gate powered by the Postil reviewer CLI.
+description: Low-noise pull request review gate powered by the Postil CLI.
 author: Postil
 
 branding:
@@ -8,16 +8,18 @@ branding:
 
 inputs:
   api-key:
-    description: OpenRouter API key used by the reviewer model.
+    description: OpenRouter API key used by the review model.
     required: true
   github-token:
     description: GitHub token used to read pull request diffs and post review output.
     required: false
     default: ${{ github.token }}
-  reviewer-ref:
-    description: Full postil-dev/postil-reviewer commit SHA to install and run.
+  cli-ref:
+    description: Full postil-dev/postil-cli commit SHA to install and run.
     required: false
-    default: d51705920a8fca2717a7b9c1bb224e7cdede661a
+  reviewer-ref:
+    description: Deprecated. Use cli-ref instead.
+    required: false
   model:
     description: Primary OpenRouter model name.
     required: false
@@ -34,7 +36,7 @@ inputs:
     required: false
     default: "false"
   config-path:
-    description: Optional local Postil config path. Leave empty to let the reviewer read repo config from GitHub.
+    description: Optional local Postil config path. Leave empty to let the CLI read repo config from GitHub.
     required: false
   repo:
     description: "Repository in owner/name form. Defaults to GITHUB_REPOSITORY or pull_request event data."
@@ -52,7 +54,7 @@ inputs:
     description: Override OpenRouter API URL.
     required: false
   diff-limit:
-    description: Optional maximum diff bytes for the reviewer.
+    description: Optional maximum diff bytes for the CLI.
     required: false
   check-name:
     description: Optional GitHub check name override.
@@ -64,16 +66,27 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Validate reviewer ref
+    - name: Resolve CLI ref
       shell: bash
       env:
+        CLI_REF: ${{ inputs.cli-ref }}
         REVIEWER_REF: ${{ inputs.reviewer-ref }}
       run: |
         set -euo pipefail
-        if [[ ! "$REVIEWER_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
-          echo "::error::reviewer-ref must be a full 40-character postil-dev/postil-reviewer commit SHA."
+        default_ref="7c3bff5410c60309f2e0f1700c5637b0c93bea5e"
+        if [[ -n "$REVIEWER_REF" ]]; then
+          echo "::error::reviewer-ref has been replaced by cli-ref. Use a full postil-dev/postil-cli commit SHA."
           exit 1
         fi
+        resolved_ref="$default_ref"
+        if [[ -n "$CLI_REF" ]]; then
+          resolved_ref="$CLI_REF"
+        fi
+        if [[ ! "$resolved_ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          echo "::error::cli-ref must be a full 40-character postil-dev/postil-cli commit SHA."
+          exit 1
+        fi
+        echo "POSTIL_CLI_REF=$resolved_ref" >> "$GITHUB_ENV"
 
     - name: Install Rust toolchain
       shell: bash
@@ -86,15 +99,15 @@ runs:
           sh -s -- --profile minimal --default-toolchain stable -y
         echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-    - name: Install Postil reviewer
+    - name: Install Postil CLI
       shell: bash
       env:
-        REVIEWER_REF: ${{ inputs.reviewer-ref }}
+        CLI_REF: ${{ env.POSTIL_CLI_REF }}
       run: |
         set -euo pipefail
         cargo install \
-          --git https://github.com/postil-dev/postil-reviewer \
-          --rev "$REVIEWER_REF" \
+          --git https://github.com/postil-dev/postil-cli \
+          --rev "$CLI_REF" \
           --locked \
           --force
 
