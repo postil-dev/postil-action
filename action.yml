@@ -73,7 +73,7 @@ runs:
         REVIEWER_REF: ${{ inputs.reviewer-ref }}
       run: |
         set -euo pipefail
-        default_ref="7c3bff5410c60309f2e0f1700c5637b0c93bea5e"
+        default_ref="d0c81b91b6082c7788b2dec78eaf5f5bacc348c2"
         if [[ -n "$REVIEWER_REF" ]]; then
           echo "::error::reviewer-ref has been replaced by cli-ref. Use a full postil-dev/postil-cli commit SHA."
           exit 1

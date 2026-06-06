@@ -59,7 +59,7 @@ target explicitly:
 | -------------------- | -------- | ------------------------------------------ | ------------------------------------------------------------------ |
 | `api-key`            | yes      |                                            | OpenRouter API key.                                                |
 | `github-token`       | no       | `${{ github.token }}`                      | Token for GitHub API reads and review output.                      |
-| `cli-ref`            | no       | `7c3bff5410c60309f2e0f1700c5637b0c93bea5e` | Full `postil-dev/postil-cli` commit SHA to install.                |
+| `cli-ref`            | no       | `d0c81b91b6082c7788b2dec78eaf5f5bacc348c2` | Full `postil-dev/postil-cli` commit SHA to install.                |
 | `reviewer-ref`       | no       |                                            | Deprecated. Use `cli-ref` instead.                                 |
 | `model`              | no       | `deepseek/deepseek-v4-pro`                 | Primary OpenRouter model.                                          |
 | `model-cascade`      | no       |                                            | Optional comma-separated fallback models.                          |
