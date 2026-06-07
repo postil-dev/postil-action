@@ -119,13 +119,13 @@ runs:
         REVIEW_MODEL: ${{ inputs.model }}
         REVIEW_MODEL_CASCADE: ${{ inputs.model-cascade }}
         POSTIL_FAIL_ON: ${{ inputs.fail-on }}
-        POSTIL_GITHUB_API_URL: ${{ inputs.github-api-url }}
-        POSTIL_OPENROUTER_API_URL: ${{ inputs.openrouter-api-url }}
         POSTIL_CHECK_NAME: ${{ inputs.check-name }}
         INPUT_CONFIG_PATH: ${{ inputs.config-path }}
         INPUT_REPO: ${{ inputs.repo }}
         INPUT_PR: ${{ inputs.pr }}
         INPUT_SHA: ${{ inputs.sha }}
+        INPUT_GITHUB_API_URL: ${{ inputs.github-api-url }}
+        INPUT_OPENROUTER_API_URL: ${{ inputs.openrouter-api-url }}
         INPUT_NO_INLINE: ${{ inputs.no-inline }}
         INPUT_DIFF_LIMIT: ${{ inputs.diff-limit }}
         INPUT_OUTPUT_JSON: ${{ inputs.output-json }}
@@ -145,6 +145,12 @@ runs:
         fi
         if [[ -n "$INPUT_SHA" ]]; then
           args+=(--sha "$INPUT_SHA")
+        fi
+        if [[ -n "$INPUT_GITHUB_API_URL" ]]; then
+          args+=(--github-api-url "$INPUT_GITHUB_API_URL")
+        fi
+        if [[ -n "$INPUT_OPENROUTER_API_URL" ]]; then
+          args+=(--openrouter-api-url "$INPUT_OPENROUTER_API_URL")
         fi
         if [[ -n "$INPUT_DIFF_LIMIT" ]]; then
           args+=(--diff-limit "$INPUT_DIFF_LIMIT")
