@@ -1,0 +1,225 @@
+name: Postil Review
+description: Run the Postil low-noise PR review gate against a pull request.
+author: Postil
+branding:
+  icon: git-pull-request
+  color: green
+
+inputs:
+  api-key:
+    description: OpenRouter API key.
+    required: true
+  github-token:
+    description: Token for GitHub API reads, inline review comments, and check-run output.
+    required: false
+    default: ${{ github.token }}
+  cli-ref:
+    description: Full 40-character commit SHA in postil-dev/postil-cli to install.
+    required: false
+    default: ""
+  cli-version:
+    description: Crates.io version tag of postil-cli to install. Mutually exclusive with cli-ref.
+    required: false
+    default: ""
+  model:
+    description: Primary OpenRouter model.
+    required: false
+    default: deepseek/deepseek-v4-pro
+  model-cascade:
+    description: Comma-separated fallback model list.
+    required: false
+    default: ""
+  fail-on:
+    description: Severity threshold for non-zero exit. One of info, warn, error.
+    required: false
+    default: error
+  no-inline:
+    description: When "true", do not post inline review comments.
+    required: false
+    default: "false"
+  config-path:
+    description: Optional path to a runtime config file (YAML or JSON).
+    required: false
+    default: ""
+  repo:
+    description: Repository in owner/name form. Required for pull_request_target.
+    required: false
+    default: ""
+  pr:
+    description: Pull-request number override.
+    required: false
+    default: ""
+  sha:
+    description: Pull-request head SHA override.
+    required: false
+    default: ""
+  github-api-url:
+    description: GitHub Enterprise base URL override.
+    required: false
+    default: ""
+  openrouter-api-url:
+    description: OpenRouter base URL override.
+    required: false
+    default: ""
+  diff-limit:
+    description: Maximum diff bytes sent to the model.
+    required: false
+    default: ""
+  check-name:
+    description: GitHub check-run name override (default postil/review).
+    required: false
+    default: ""
+  output-json:
+    description: Path to write the structured review envelope.
+    required: false
+    default: ""
+  reviewer-ref:
+    description: DEPRECATED — use cli-ref. Provided here to surface a clear migration error.
+    required: false
+    default: ""
+
+outputs:
+  conclusion:
+    description: "success | neutral | failure — the resolved check conclusion."
+    value: ${{ steps.run.outputs.conclusion }}
+  findings-count:
+    description: Number of findings posted to the PR.
+    value: ${{ steps.run.outputs.findings_count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Reject deprecated reviewer-ref
+      if: inputs.reviewer-ref != ''
+      shell: bash
+      run: |
+        echo "::error::reviewer-ref is removed. Pass cli-ref (a full 40-character postil-dev/postil-cli commit SHA) instead."
+        exit 1
+
+    - name: Validate cli-ref / cli-version
+      shell: bash
+      env:
+        CLI_REF: ${{ inputs.cli-ref }}
+        CLI_VERSION: ${{ inputs.cli-version }}
+      run: |
+        set -euo pipefail
+        if [[ -n "$CLI_REF" && -n "$CLI_VERSION" ]]; then
+          echo "::error::Pass either cli-ref or cli-version, not both."
+          exit 1
+        fi
+        if [[ -n "$CLI_REF" && ! "$CLI_REF" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::cli-ref must be a full 40-character lowercase commit SHA. Got: $CLI_REF"
+          exit 1
+        fi
+
+    - name: Ensure Rust toolchain
+      if: inputs.cli-version == '' || (inputs.cli-version != '' && inputs.cli-ref != '')
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v cargo >/dev/null 2>&1; then
+          echo "cargo present: $(cargo --version)"
+        else
+          echo "Installing minimal Rust toolchain..."
+          curl --proto =https --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        fi
+
+    - name: Install postil CLI
+      shell: bash
+      env:
+        CLI_REF: ${{ inputs.cli-ref }}
+        CLI_VERSION: ${{ inputs.cli-version }}
+      run: |
+        set -euo pipefail
+        export PATH="$HOME/.cargo/bin:$PATH"
+        if [[ -n "$CLI_VERSION" ]]; then
+          echo "Installing postil-cli@$CLI_VERSION from crates.io"
+          cargo install postil-cli --locked --force --version "$CLI_VERSION"
+        elif [[ -n "$CLI_REF" ]]; then
+          echo "Installing postil-cli at $CLI_REF from git"
+          cargo install --git https://github.com/postil-dev/postil-cli --rev "$CLI_REF" --locked --force
+        else
+          echo "Installing postil-cli HEAD from git"
+          cargo install --git https://github.com/postil-dev/postil-cli --locked --force
+        fi
+        echo "postil installed at $(command -v postil)"
+        postil --version
+
+    - name: Resolve PR context
+      id: ctx
+      shell: bash
+      env:
+        IN_REPO: ${{ inputs.repo }}
+        IN_PR: ${{ inputs.pr }}
+        IN_SHA: ${{ inputs.sha }}
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+        EVENT_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        GH_REPOSITORY: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        REPO="${IN_REPO:-$GH_REPOSITORY}"
+        PR="${IN_PR:-$EVENT_PR_NUMBER}"
+        SHA="${IN_SHA:-$EVENT_PR_HEAD_SHA}"
+        if [[ -z "$REPO" || -z "$PR" || -z "$SHA" ]]; then
+          echo "::error::Could not resolve repo/pr/sha from inputs or event payload. event_name=$EVENT_NAME"
+          exit 1
+        fi
+        echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+        echo "pr=$PR" >> "$GITHUB_OUTPUT"
+        echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+    - name: Run postil review
+      id: run
+      shell: bash
+      env:
+        OPENROUTER_API_KEY: ${{ inputs.api-key }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REVIEW_MODEL: ${{ inputs.model }}
+        REVIEW_MODEL_CASCADE: ${{ inputs.model-cascade }}
+        POSTIL_FAIL_ON: ${{ inputs.fail-on }}
+        POSTIL_CHECK_NAME: ${{ inputs.check-name }}
+        POSTIL_GITHUB_API_URL: ${{ inputs.github-api-url }}
+        POSTIL_OPENROUTER_API_URL: ${{ inputs.openrouter-api-url }}
+      run: |
+        set +e
+        export PATH="$HOME/.cargo/bin:$PATH"
+        OUT_JSON="${{ inputs.output-json }}"
+        if [[ -z "$OUT_JSON" ]]; then
+          OUT_JSON="$RUNNER_TEMP/postil-envelope.json"
+        fi
+        ARGS=(
+          --repo "${{ steps.ctx.outputs.repo }}"
+          --pr   "${{ steps.ctx.outputs.pr }}"
+          --sha  "${{ steps.ctx.outputs.sha }}"
+          --output-json "$OUT_JSON"
+        )
+        if [[ "${{ inputs.no-inline }}" == "true" ]]; then ARGS+=(--no-inline); fi
+        if [[ -n "${{ inputs.config-path }}" ]]; then ARGS+=(--config "${{ inputs.config-path }}"); fi
+        if [[ -n "${{ inputs.diff-limit }}" ]]; then ARGS+=(--diff-limit "${{ inputs.diff-limit }}"); fi
+        postil review "${ARGS[@]}"
+        STATUS=$?
+        if [[ -f "$OUT_JSON" ]]; then
+          COUNT=$(jq '.findings | length' "$OUT_JSON" 2>/dev/null || echo 0)
+          SUMMARY=$(jq -r '.summary // ""' "$OUT_JSON" 2>/dev/null || echo "")
+          WORST=$(jq -r '[.findings[].severity] | map(if . == "error" then 3 elif . == "warn" then 2 else 1 end) | max // 0' "$OUT_JSON" 2>/dev/null || echo 0)
+          case "$WORST" in
+            3) CONCL="failure" ;;
+            2|1) CONCL="neutral" ;;
+            *) CONCL="success" ;;
+          esac
+          echo "conclusion=$CONCL" >> "$GITHUB_OUTPUT"
+          echo "findings_count=$COUNT" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Postil"
+            echo ""
+            if [[ "$COUNT" == "0" ]]; then
+              echo "No merge-relevant findings."
+            else
+              echo "$COUNT finding(s). Worst: $CONCL."
+              [[ -n "$SUMMARY" ]] && echo "" && echo "> $SUMMARY"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+        exit $STATUS
