@@ -1,0 +1,204 @@
+name: "Postil Review"
+description: "Low-noise AI review gate: silent on clean PRs, hard gate on real risk. Bring your own model key."
+author: "postil-dev"
+branding:
+  icon: git-pull-request
+  color: green
+
+inputs:
+  cli-ref:
+    description: >-
+      Full 40-character commit SHA of postil-dev/postil-cli to install.
+      A pinned SHA is required: tags and branches are mutable and this binary
+      posts to your pull requests.
+    required: true
+  cli-release:
+    description: >-
+      Optional release tag (e.g. v0.1.0) to fetch a prebuilt binary from.
+      The release commit must match cli-ref and the artifact checksum must
+      verify; otherwise the action falls back to building from cli-ref.
+    required: false
+    default: ""
+  api-key:
+    description: "API key for the model endpoint (OpenRouter by default). Postil never proxies inference."
+    required: true
+  api-base:
+    description: "OpenAI-compatible endpoint base URL."
+    required: false
+    default: ""
+  model:
+    description: "Model to use (defaults to repo config or deepseek/deepseek-v4-pro)."
+    required: false
+    default: ""
+  model-cascade:
+    description: "Comma-separated fallback models."
+    required: false
+    default: ""
+  fail-on:
+    description: "Fail the job at/above this severity: info | warn | error | never. Defaults to gate.failOn from repo config."
+    required: false
+    default: ""
+  config:
+    description: "Explicit config file path (bypasses .postil.yaml discovery)."
+    required: false
+    default: ""
+  pr:
+    description: "Pull request number. Defaults to the triggering pull_request event."
+    required: false
+    default: ""
+  since-sha:
+    description: "Incremental review: only commits since this SHA."
+    required: false
+    default: ""
+  baseline:
+    description: "Path to a previous review envelope for finding reconciliation."
+    required: false
+    default: ""
+  soft-fail:
+    description: "Report findings but never fail the job (true/false)."
+    required: false
+    default: "false"
+  github-token:
+    description: "Token used to read the PR diff and post review + checks."
+    required: false
+    default: ${{ github.token }}
+  reviewer-ref:
+    description: "Deprecated. Use cli-ref."
+    required: false
+    default: ""
+
+outputs:
+  envelope-path:
+    description: "Path to the review envelope JSON."
+    value: ${{ steps.review.outputs.envelope-path }}
+  gate-failing:
+    description: "true when gate-level findings exist."
+    value: ${{ steps.review.outputs.gate-failing }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        CLI_REF: ${{ inputs.cli-ref }}
+        DEPRECATED_REF: ${{ inputs.reviewer-ref }}
+      run: |
+        set -euo pipefail
+        if [ -n "$DEPRECATED_REF" ]; then
+          echo "::error::input 'reviewer-ref' was removed; pin the CLI with 'cli-ref: <40-hex sha of postil-dev/postil-cli>'"
+          exit 1
+        fi
+        if ! printf '%s' "$CLI_REF" | grep -Eq '^[0-9a-f]{40}$'; then
+          echo "::error::cli-ref must be a full 40-character lowercase commit SHA, got '$CLI_REF'"
+          exit 1
+        fi
+
+    - name: Install postil
+      shell: bash
+      env:
+        CLI_REF: ${{ inputs.cli-ref }}
+        CLI_RELEASE: ${{ inputs.cli-release }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        DEST="$RUNNER_TEMP/postil-bin"
+        mkdir -p "$DEST"
+
+        prebuilt_ok=false
+        if [ -n "$CLI_RELEASE" ]; then
+          echo "Trying prebuilt binary from release $CLI_RELEASE"
+          api="https://api.github.com/repos/postil-dev/postil-cli"
+          # The release must point at the pinned commit; refuse a mismatched tag.
+          tag_sha=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            "$api/commits/$CLI_RELEASE" | jq -r '.sha' || echo "")
+          if [ "$tag_sha" = "$CLI_REF" ]; then
+            case "$(uname -m)" in
+              x86_64) target="x86_64-unknown-linux-gnu" ;;
+              aarch64|arm64) target="aarch64-unknown-linux-gnu" ;;
+              *) target="" ;;
+            esac
+            if [ -n "$target" ]; then
+              base="https://github.com/postil-dev/postil-cli/releases/download/$CLI_RELEASE"
+              if curl -fsSL -o "$DEST/postil.tar.gz" "$base/postil-$target.tar.gz" \
+                 && curl -fsSL -o "$DEST/postil.tar.gz.sha256" "$base/postil-$target.tar.gz.sha256"; then
+                expected=$(awk '{print $1}' "$DEST/postil.tar.gz.sha256")
+                actual=$(sha256sum "$DEST/postil.tar.gz" | awk '{print $1}')
+                if [ "$expected" = "$actual" ]; then
+                  tar -xzf "$DEST/postil.tar.gz" -C "$DEST"
+                  chmod +x "$DEST/postil"
+                  prebuilt_ok=true
+                else
+                  echo "::warning::release artifact checksum mismatch; falling back to source build"
+                fi
+              else
+                echo "::warning::no prebuilt artifact for $target on $CLI_RELEASE; falling back to source build"
+              fi
+            fi
+          else
+            echo "::warning::release $CLI_RELEASE points at ${tag_sha:-unknown}, not cli-ref $CLI_REF; falling back to source build"
+          fi
+        fi
+
+        if [ "$prebuilt_ok" = false ]; then
+          echo "Building postil from postil-dev/postil-cli@$CLI_REF"
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+            . "$HOME/.cargo/env"
+          fi
+          cargo install --quiet --git https://github.com/postil-dev/postil-cli \
+            --rev "$CLI_REF" --locked --root "$DEST" postil-cli
+          # cargo install --root puts the binary in bin/.
+          mv "$DEST/bin/postil" "$DEST/postil"
+        fi
+
+        echo "$DEST" >> "$GITHUB_PATH"
+        "$DEST/postil" --version
+
+    - name: Review
+      id: review
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        POSTIL_API_KEY: ${{ inputs.api-key }}
+        POSTIL_API_BASE: ${{ inputs.api-base }}
+        REVIEW_MODEL: ${{ inputs.model }}
+        REVIEW_MODEL_CASCADE: ${{ inputs.model-cascade }}
+        INPUT_PR: ${{ inputs.pr }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_SINCE_SHA: ${{ inputs.since-sha }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
+        INPUT_SOFT_FAIL: ${{ inputs.soft-fail }}
+        EVENT_PR: ${{ github.event.pull_request.number }}
+      run: |
+        set -euo pipefail
+        PR="${INPUT_PR:-$EVENT_PR}"
+        if [ -z "$PR" ]; then
+          echo "::error::no pull request number: pass 'pr' or run on a pull_request event"
+          exit 1
+        fi
+        ENVELOPE="$RUNNER_TEMP/postil-envelope.json"
+        args=(review --repo "$GITHUB_REPOSITORY" --pr "$PR" --output-json)
+        [ -n "$INPUT_FAIL_ON" ]   && args+=(--fail-on "$INPUT_FAIL_ON")
+        [ -n "$INPUT_CONFIG" ]    && args+=(--config "$INPUT_CONFIG")
+        [ -n "$INPUT_SINCE_SHA" ] && args+=(--since-sha "$INPUT_SINCE_SHA")
+        [ -n "$INPUT_BASELINE" ]  && args+=(--baseline "$INPUT_BASELINE")
+
+        set +e
+        postil "${args[@]}" > "$ENVELOPE"
+        code=$?
+        set -e
+
+        echo "envelope-path=$ENVELOPE" >> "$GITHUB_OUTPUT"
+        gate=$(jq -r '.gate.failing // false' "$ENVELOPE" 2>/dev/null || echo "unknown")
+        echo "gate-failing=$gate" >> "$GITHUB_OUTPUT"
+
+        if [ "$code" -eq 2 ]; then
+          echo "::error::postil review failed to run (operational error)"
+          exit 2
+        fi
+        if [ "$code" -eq 1 ] && [ "$INPUT_SOFT_FAIL" != "true" ]; then
+          echo "::error::postil gate is failing (see the postil/gate check for details)"
+          exit 1
+        fi
