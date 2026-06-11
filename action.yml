@@ -122,11 +122,15 @@ runs:
           tag_sha=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
             "$api/commits/$CLI_RELEASE" | jq -r '.sha' || echo "")
           if [ "$tag_sha" = "$CLI_REF" ]; then
-            case "$(uname -m)" in
-              x86_64) target="x86_64-unknown-linux-gnu" ;;
-              aarch64|arm64) target="aarch64-unknown-linux-gnu" ;;
-              *) target="" ;;
-            esac
+            # Prebuilt artifacts are Linux-only here; other runners fall back
+            # to the source build rather than fetching a binary that cannot run.
+            target=""
+            if [ "$RUNNER_OS" = "Linux" ]; then
+              case "$(uname -m)" in
+                x86_64) target="x86_64-unknown-linux-gnu" ;;
+                aarch64|arm64) target="aarch64-unknown-linux-gnu" ;;
+              esac
+            fi
             if [ -n "$target" ]; then
               base="https://github.com/postil-dev/postil-cli/releases/download/$CLI_RELEASE"
               if curl -fsSL -o "$DEST/postil.tar.gz" "$base/postil-$target.tar.gz" \
@@ -183,6 +187,8 @@ runs:
         EVENT_PR: ${{ github.event.pull_request.number }}
       run: |
         set -euo pipefail
+        # A set-but-empty key must not shadow a job-level OPENROUTER_API_KEY.
+        [ -z "${POSTIL_API_KEY:-}" ] && unset POSTIL_API_KEY
         PR="${INPUT_PR:-$EVENT_PR}"
         if [ -z "$PR" ]; then
           echo "::error::no pull request number: pass 'pr' or run on a pull_request event"
@@ -202,13 +208,19 @@ runs:
         set -e
 
         echo "envelope-path=$ENVELOPE" >> "$GITHUB_OUTPUT"
-        [ -n "$INPUT_SARIF_PATH" ] && echo "sarif-path=$INPUT_SARIF_PATH" >> "$GITHUB_OUTPUT"
+        # Only advertise SARIF that was actually written; a crashed run may
+        # have died before producing it.
+        [ -n "$INPUT_SARIF_PATH" ] && [ -f "$INPUT_SARIF_PATH" ] \
+          && echo "sarif-path=$INPUT_SARIF_PATH" >> "$GITHUB_OUTPUT"
         gate=$(jq -r '.gate.failing // false' "$ENVELOPE" 2>/dev/null || echo "unknown")
         echo "gate-failing=$gate" >> "$GITHUB_OUTPUT"
 
-        if [ "$code" -eq 2 ]; then
-          echo "::error::postil review failed to run (operational error)"
-          exit 2
+        # Fail closed on every outcome except clean (0) and gate-failing (1):
+        # a panic (101), timeout (124), or OOM kill (137) must never read as
+        # a pass.
+        if [ "$code" -ne 0 ] && [ "$code" -ne 1 ]; then
+          echo "::error::postil review did not complete (exit $code)"
+          exit "$code"
         fi
         if [ "$code" -eq 1 ] && [ "$INPUT_SOFT_FAIL" != "true" ]; then
           echo "::error::postil gate is failing (see the postil/gate check for details)"

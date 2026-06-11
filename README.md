@@ -46,16 +46,18 @@ never block, the gate check does.
 | `api-base` | no | Any OpenAI-compatible endpoint (OpenRouter default; Ollama, vLLM, Azure OpenAI). |
 | `model`, `model-cascade` | no | Model override and comma-separated fallbacks. |
 | `fail-on` | no | `info`/`warn`/`error`/`never` — overrides `gate.failOn` from repo config. |
-| `config` | no | Explicit config path; otherwise `.postil.yaml` > `.coderabbit.yaml` > `.kodo.yaml`. |
+| `config` | no | Explicit config path; otherwise `.postil.yaml` > `.coderabbit.yaml`. |
 | `pr` | no | PR number; defaults to the triggering `pull_request` event. |
 | `since-sha`, `baseline` | no | Incremental re-review (see CLI docs). |
 | `soft-fail` | no | Report findings without failing the job. |
+| `sarif-path` | no | Write SARIF 2.1.0 here, for upload via `github/codeql-action/upload-sarif`. |
 | `github-token` | no | Defaults to `github.token`. Needs `pull-requests: write` and `checks: write`. |
 
 ## Outputs
 
 - `envelope-path`: path to the review envelope JSON.
 - `gate-failing`: `true` when gate-level findings exist.
+- `sarif-path`: path to the SARIF file, set only when `sarif-path` was requested and the file was written.
 
 ## Security notes
 
