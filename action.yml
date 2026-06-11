@@ -58,6 +58,12 @@ inputs:
     description: "Report findings but never fail the job (true/false)."
     required: false
     default: "false"
+  sarif-path:
+    description: >-
+      Optional path to write SARIF 2.1.0 to (for upload via
+      github/codeql-action/upload-sarif). Empty disables SARIF output.
+    required: false
+    default: ""
   github-token:
     description: "Token used to read the PR diff and post review + checks."
     required: false
@@ -74,6 +80,9 @@ outputs:
   gate-failing:
     description: "true when gate-level findings exist."
     value: ${{ steps.review.outputs.gate-failing }}
+  sarif-path:
+    description: "Path to the SARIF file, when sarif-path was set."
+    value: ${{ steps.review.outputs.sarif-path }}
 
 runs:
   using: composite
@@ -170,6 +179,7 @@ runs:
         INPUT_SINCE_SHA: ${{ inputs.since-sha }}
         INPUT_BASELINE: ${{ inputs.baseline }}
         INPUT_SOFT_FAIL: ${{ inputs.soft-fail }}
+        INPUT_SARIF_PATH: ${{ inputs.sarif-path }}
         EVENT_PR: ${{ github.event.pull_request.number }}
       run: |
         set -euo pipefail
@@ -184,6 +194,7 @@ runs:
         [ -n "$INPUT_CONFIG" ]    && args+=(--config "$INPUT_CONFIG")
         [ -n "$INPUT_SINCE_SHA" ] && args+=(--since-sha "$INPUT_SINCE_SHA")
         [ -n "$INPUT_BASELINE" ]  && args+=(--baseline "$INPUT_BASELINE")
+        [ -n "$INPUT_SARIF_PATH" ] && args+=(--sarif "$INPUT_SARIF_PATH")
 
         set +e
         postil "${args[@]}" > "$ENVELOPE"
@@ -191,6 +202,7 @@ runs:
         set -e
 
         echo "envelope-path=$ENVELOPE" >> "$GITHUB_OUTPUT"
+        [ -n "$INPUT_SARIF_PATH" ] && echo "sarif-path=$INPUT_SARIF_PATH" >> "$GITHUB_OUTPUT"
         gate=$(jq -r '.gate.failing // false' "$ENVELOPE" 2>/dev/null || echo "unknown")
         echo "gate-failing=$gate" >> "$GITHUB_OUTPUT"
 
