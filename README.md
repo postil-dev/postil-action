@@ -26,8 +26,8 @@ jobs:
     steps:
       - uses: postil-dev/postil-action@v1
         with:
-          cli-ref: <40-hex commit sha of postil-dev/postil-cli>
-          cli-release: v0.1.0          # optional: prebuilt binary (must match cli-ref)
+          cli-ref: 87f4bf08b63712d3600030a7c458f0b790cfc0d5   # postil-cli v0.1.1
+          cli-release: v0.1.1          # optional: prebuilt binary (must match cli-ref)
           api-key: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 

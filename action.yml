@@ -14,7 +14,7 @@ inputs:
     required: true
   cli-release:
     description: >-
-      Optional release tag (e.g. v0.1.0) to fetch a prebuilt binary from.
+      Optional release tag (e.g. v0.1.1) to fetch a prebuilt binary from.
       The release commit must match cli-ref and the artifact checksum must
       verify; otherwise the action falls back to building from cli-ref.
     required: false
