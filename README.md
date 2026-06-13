@@ -31,6 +31,12 @@ jobs:
           api-key: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 
+> **Note:** there is no `@v1` tag yet — this action has not had a tagged
+> release. Until one is published, pin the action to a reviewed commit SHA
+> (`postil-dev/postil-action@<40-hex sha>`) instead of `@v1`. Pinning to a SHA
+> is the recommended practice for third-party actions regardless; switch to
+> `@v1` once the first tag ships.
+
 The job fails when the gate fails (severity `error` findings by default). To require the
 gate without failing this job, set `soft-fail: true` and mark the `postil/gate` check as
 required in branch protection instead — that is the recommended setup: advisory comments
