@@ -103,6 +103,10 @@ runs:
           exit 1
         fi
 
+    - name: Install cosign
+      if: inputs.cli-release != ''
+      uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
     - name: Install postil
       shell: bash
       env:
@@ -119,8 +123,13 @@ runs:
           echo "Trying prebuilt binary from release $CLI_RELEASE"
           api="https://api.github.com/repos/postil-dev/postil-cli"
           # The release must point at the pinned commit; refuse a mismatched tag.
-          tag_sha=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+          # Auth header goes through a curl config file, not argv, so the
+          # token never shows up in `ps`/`/proc/<pid>/cmdline` on the runner.
+          auth_cfg="$RUNNER_TEMP/postil-gh-auth.curlrc"
+          printf 'header = "Authorization: Bearer %s"\n' "$GH_TOKEN" > "$auth_cfg"
+          tag_sha=$(curl -fsSL -K "$auth_cfg" \
             "$api/commits/$CLI_RELEASE" | jq -r '.sha' || echo "")
+          rm -f "$auth_cfg"
           if [ "$tag_sha" = "$CLI_REF" ]; then
             # Prebuilt artifacts are Linux-only here; other runners fall back
             # to the source build rather than fetching a binary that cannot run.
@@ -134,18 +143,30 @@ runs:
             if [ -n "$target" ]; then
               base="https://github.com/postil-dev/postil-cli/releases/download/$CLI_RELEASE"
               if curl -fsSL -o "$DEST/postil.tar.gz" "$base/postil-$target.tar.gz" \
-                 && curl -fsSL -o "$DEST/postil.tar.gz.sha256" "$base/postil-$target.tar.gz.sha256"; then
+                 && curl -fsSL -o "$DEST/postil.tar.gz.sha256" "$base/postil-$target.tar.gz.sha256" \
+                 && curl -fsSL -o "$DEST/postil.tar.gz.sig" "$base/postil-$target.tar.gz.sig" \
+                 && curl -fsSL -o "$DEST/postil.tar.gz.pem" "$base/postil-$target.tar.gz.pem"; then
                 expected=$(awk '{print $1}' "$DEST/postil.tar.gz.sha256")
                 actual=$(sha256sum "$DEST/postil.tar.gz" | awk '{print $1}')
-                if [ "$expected" = "$actual" ]; then
+                # Checksum guards against transit corruption; the checksum file
+                # sits next to the artifact on the same release, so it alone
+                # cannot prove the release wasn't tampered with. The Sigstore
+                # signature is tied to the specific release.yml workflow run
+                # via keyless OIDC, which a same-origin checksum can't fake.
+                if [ "$expected" = "$actual" ] && cosign verify-blob \
+                    "$DEST/postil.tar.gz" \
+                    --signature "$DEST/postil.tar.gz.sig" \
+                    --certificate "$DEST/postil.tar.gz.pem" \
+                    --certificate-identity-regexp 'https://github.com/postil-dev/postil-cli/\.github/workflows/release\.yml@refs/tags/.*' \
+                    --certificate-oidc-issuer https://token.actions.githubusercontent.com; then
                   tar -xzf "$DEST/postil.tar.gz" -C "$DEST"
                   chmod +x "$DEST/postil"
                   prebuilt_ok=true
                 else
-                  echo "::warning::release artifact checksum mismatch; falling back to source build"
+                  echo "::warning::release artifact checksum or signature verification failed; falling back to source build"
                 fi
               else
-                echo "::warning::no prebuilt artifact for $target on $CLI_RELEASE; falling back to source build"
+                echo "::warning::no prebuilt artifact (or signature) for $target on $CLI_RELEASE; falling back to source build"
               fi
             fi
           else
