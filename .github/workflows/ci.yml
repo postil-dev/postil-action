@@ -77,26 +77,36 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: "Extract run: blocks from action.yml"
+        # python3 + PyYAML ship on the runner image and are already used by
+        # the validate job; no extra tool install needed here.
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/action-scripts"
-          count=$(yq '.runs.steps | length' action.yml)
-          for i in $(seq 0 $((count - 1))); do
-            shell=$(yq -r ".runs.steps[$i].shell // \"\"" action.yml)
-            script=$(yq -r ".runs.steps[$i].run // \"\"" action.yml)
-            [ -z "$script" ] && continue
-            if [ "$shell" != "bash" ]; then
-              echo "::error::step $i uses shell '$shell', expected 'bash' (shellcheck extraction assumes bash)"
-              exit 1
-            fi
-            name=$(yq -r ".runs.steps[$i].name // \"step-$i\"" action.yml)
-            slug=$(printf '%s' "$name" | tr -c 'a-zA-Z0-9' '-')
-            out="$RUNNER_TEMP/action-scripts/${i}-${slug}.sh"
-            {
-              echo "#!/usr/bin/env bash"
-              printf '%s\n' "$script"
-            } > "$out"
-          done
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+          import yaml
+
+          with open("action.yml") as f:
+              doc = yaml.safe_load(f)
+
+          outdir = os.path.join(os.environ["RUNNER_TEMP"], "action-scripts")
+          for i, step in enumerate(doc["runs"]["steps"]):
+              script = step.get("run")
+              if not script:
+                  continue
+              if step.get("shell") != "bash":
+                  print(
+                      f"::error::step {i} uses shell '{step.get('shell')}', "
+                      "expected 'bash' (shellcheck extraction assumes bash)"
+                  )
+                  sys.exit(1)
+              slug = re.sub(r"[^a-zA-Z0-9]", "-", step.get("name", f"step-{i}"))
+              with open(os.path.join(outdir, f"{i}-{slug}.sh"), "w") as out:
+                  out.write("#!/usr/bin/env bash\n")
+                  out.write(script if script.endswith("\n") else script + "\n")
+          PY
           ls -la "$RUNNER_TEMP/action-scripts"
       - name: shellcheck
         run: |
