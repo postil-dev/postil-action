@@ -1,0 +1,180 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          chmod +x actionlint
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: actionlint (workflow files)
+        run: actionlint -color
+      - name: Validate action.yml structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          # actionlint does not validate action.yml itself, only workflow
+          # files, so check the composite action's structure separately:
+          # it must parse as YAML and carry the fields every consumer and
+          # the GitHub Actions runner require.
+          python3 - <<'PY'
+          import sys
+          import yaml
+
+          with open("action.yml") as f:
+              doc = yaml.safe_load(f)
+
+          errors = []
+          for field in ("name", "description", "runs"):
+              if field not in doc:
+                  errors.append(f"missing required top-level field: {field}")
+
+          runs = doc.get("runs", {})
+          if runs.get("using") != "composite":
+              errors.append("runs.using must be 'composite'")
+          steps = runs.get("steps")
+          if not isinstance(steps, list) or not steps:
+              errors.append("runs.steps must be a non-empty list")
+          else:
+              for i, step in enumerate(steps):
+                  if "run" in step and "shell" not in step:
+                      errors.append(f"steps[{i}] has 'run' but no 'shell'")
+
+          for name, spec in (doc.get("inputs") or {}).items():
+              if spec.get("required") and "default" in spec:
+                  errors.append(f"input '{name}' is required but also sets a default")
+
+          if errors:
+              print("action.yml validation failed:", file=sys.stderr)
+              for e in errors:
+                  print(f"  - {e}", file=sys.stderr)
+              sys.exit(1)
+          print("action.yml: OK ({} inputs, {} outputs, {} steps)".format(
+              len(doc.get("inputs") or {}), len(doc.get("outputs") or {}), len(steps)))
+          PY
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: "Extract run: blocks from action.yml"
+        # python3 + PyYAML ship on the runner image and are already used by
+        # the validate job; no extra tool install needed here.
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/action-scripts"
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+          import yaml
+
+          with open("action.yml") as f:
+              doc = yaml.safe_load(f)
+
+          outdir = os.path.join(os.environ["RUNNER_TEMP"], "action-scripts")
+          for i, step in enumerate(doc["runs"]["steps"]):
+              script = step.get("run")
+              if not script:
+                  continue
+              if step.get("shell") != "bash":
+                  print(
+                      f"::error::step {i} uses shell '{step.get('shell')}', "
+                      "expected 'bash' (shellcheck extraction assumes bash)"
+                  )
+                  sys.exit(1)
+              slug = re.sub(r"[^a-zA-Z0-9]", "-", step.get("name", f"step-{i}"))
+              with open(os.path.join(outdir, f"{i}-{slug}.sh"), "w") as out:
+                  out.write("#!/usr/bin/env bash\n")
+                  out.write(script if script.endswith("\n") else script + "\n")
+          PY
+          ls -la "$RUNNER_TEMP/action-scripts"
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          scripts=("$RUNNER_TEMP"/action-scripts/*.sh)
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "::error::no run: blocks extracted from action.yml"
+            exit 1
+          fi
+          # SC1091: the install step sources ~/.cargo/env, a file that only
+          # exists after rustup runs earlier in that same script. Nothing to
+          # follow at lint time; not a real finding.
+          shellcheck --shell=bash --exclude=SC1091 "${scripts[@]}"
+
+  # The action has three composite steps: "Validate inputs", "Install
+  # postil" (fetch + cosign-verify the pinned CLI, or build from source),
+  # and "Review" (the actual LLM call). They are not separable via `uses:`
+  # since this is a single composite action with unconditional steps, and
+  # calling the action end-to-end would run the "Review" step for real.
+  #
+  # In a workflow triggered by `pull_request`, github.event.pull_request.number
+  # is always populated, so `Review` would resolve a PR number regardless of
+  # the `pr` input and go on to call the configured model endpoint with
+  # whatever `api-key` we pass. There is no input combination that reliably
+  # stops the action before that network call on every trigger this workflow
+  # runs on. So instead of invoking the action itself, this job replicates
+  # its install/verify path (same commands, same cosign-verifier invocation)
+  # and stops there, before anything that would need an LLM API key.
+  smoke-install:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Fetch, cosign-verify, and run the pinned CLI release
+        env:
+          CLI_REF: 87f4bf08b63712d3600030a7c458f0b790cfc0d5 # postil-cli v0.1.1
+          CLI_RELEASE: v0.1.1
+        run: |
+          set -euo pipefail
+          DEST="$RUNNER_TEMP/postil-bin"
+          mkdir -p "$DEST"
+          target="x86_64-unknown-linux-gnu"
+          base="https://github.com/postil-dev/postil-cli/releases/download/$CLI_RELEASE"
+
+          curl -fsSL -o "$DEST/postil.tar.gz" "$base/postil-$target.tar.gz"
+          curl -fsSL -o "$DEST/postil.tar.gz.sha256" "$base/postil-$target.tar.gz.sha256"
+          curl -fsSL -o "$DEST/postil.tar.gz.sig" "$base/postil-$target.tar.gz.sig"
+          curl -fsSL -o "$DEST/postil.tar.gz.pem" "$base/postil-$target.tar.gz.pem"
+
+          expected=$(awk '{print $1}' "$DEST/postil.tar.gz.sha256")
+          actual=$(sha256sum "$DEST/postil.tar.gz" | awk '{print $1}')
+          [ "$expected" = "$actual" ]
+
+          cosign verify-blob \
+            "$DEST/postil.tar.gz" \
+            --signature "$DEST/postil.tar.gz.sig" \
+            --certificate "$DEST/postil.tar.gz.pem" \
+            --certificate-identity-regexp 'https://github.com/postil-dev/postil-cli/\.github/workflows/release\.yml@refs/tags/.*' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+          tar -xzf "$DEST/postil.tar.gz" -C "$DEST"
+          chmod +x "$DEST/postil"
+          "$DEST/postil" --version
+
+          # Boundary: this is as far as the smoke test goes. The action's
+          # "Review" step, deliberately not exercised here, takes it from
+          # here to `postil review --repo ... --pr ...`, which needs a real
+          # PR and a working model API key.
