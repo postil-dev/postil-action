@@ -23,6 +23,7 @@ permissions:
 jobs:
   postil:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: postil-dev/postil-action@v1
         with:
@@ -30,6 +31,9 @@ jobs:
           cli-release: v0.1.1          # optional: prebuilt binary (must match cli-ref)
           api-key: ${{ secrets.OPENROUTER_API_KEY }}
 ```
+
+Set `timeout-minutes` on the job: a hung model endpoint or a stuck source build
+should not tie up your runner queue indefinitely.
 
 > **Note:** there is no `@v1` tag yet — this action has not had a tagged
 > release. Until one is published, pin the action to a reviewed commit SHA
