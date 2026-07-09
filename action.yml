@@ -127,7 +127,7 @@ runs:
           # token never shows up in `ps`/`/proc/<pid>/cmdline` on the runner.
           auth_cfg="$RUNNER_TEMP/postil-gh-auth.curlrc"
           printf 'header = "Authorization: Bearer %s"\n' "$GH_TOKEN" > "$auth_cfg"
-          tag_sha=$(curl -fsSL -K "$auth_cfg" \
+          tag_sha=$(curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -K "$auth_cfg" \
             "$api/commits/$CLI_RELEASE" | jq -r '.sha' || echo "")
           rm -f "$auth_cfg"
           if [ "$tag_sha" = "$CLI_REF" ]; then
@@ -142,10 +142,10 @@ runs:
             fi
             if [ -n "$target" ]; then
               base="https://github.com/postil-dev/postil-cli/releases/download/$CLI_RELEASE"
-              if curl -fsSL -o "$DEST/postil.tar.gz" "$base/postil-$target.tar.gz" \
-                 && curl -fsSL -o "$DEST/postil.tar.gz.sha256" "$base/postil-$target.tar.gz.sha256" \
-                 && curl -fsSL -o "$DEST/postil.tar.gz.sig" "$base/postil-$target.tar.gz.sig" \
-                 && curl -fsSL -o "$DEST/postil.tar.gz.pem" "$base/postil-$target.tar.gz.pem"; then
+              if curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz" "$base/postil-$target.tar.gz" \
+                 && curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz.sha256" "$base/postil-$target.tar.gz.sha256" \
+                 && curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz.sig" "$base/postil-$target.tar.gz.sig" \
+                 && curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz.pem" "$base/postil-$target.tar.gz.pem"; then
                 expected=$(awk '{print $1}' "$DEST/postil.tar.gz.sha256")
                 actual=$(sha256sum "$DEST/postil.tar.gz" | awk '{print $1}')
                 # Checksum guards against transit corruption; the checksum file
@@ -168,6 +168,8 @@ runs:
               else
                 echo "::warning::no prebuilt artifact (or signature) for $target on $CLI_RELEASE; falling back to source build"
               fi
+            else
+              echo "::notice::no prebuilt target for $RUNNER_OS/$(uname -m); falling back to source build"
             fi
           else
             echo "::warning::release $CLI_RELEASE points at ${tag_sha:-unknown}, not cli-ref $CLI_REF; falling back to source build"
@@ -177,7 +179,7 @@ runs:
         if [ "$prebuilt_ok" = false ]; then
           echo "Building postil from postil-dev/postil-cli@$CLI_REF"
           if ! command -v cargo >/dev/null 2>&1; then
-            curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+            curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 https://sh.rustup.rs | sh -s -- -y --profile minimal
             . "$HOME/.cargo/env"
           fi
           cargo install --quiet --git https://github.com/postil-dev/postil-cli \
