@@ -140,24 +140,44 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            artifact-required: "true"
+          - target: x86_64-unknown-linux-musl
+            artifact-required: "true"
+          - target: aarch64-unknown-linux-gnu
+            artifact-required: "true"
+          - target: aarch64-unknown-linux-musl
+            artifact-required: "false"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
-      - name: Fetch, cosign-verify, and run the pinned CLI release
+      - name: Fetch, cosign-verify, and smoke test the pinned CLI release
         env:
           CLI_REF: 87f4bf08b63712d3600030a7c458f0b790cfc0d5 # postil-cli v0.1.1
           CLI_RELEASE: v0.1.1
+          TARGET: ${{ matrix.target }}
+          ARTIFACT_REQUIRED: ${{ matrix.artifact-required }}
         run: |
           set -euo pipefail
           DEST="$RUNNER_TEMP/postil-bin"
           mkdir -p "$DEST"
-          target="x86_64-unknown-linux-gnu"
           base="https://github.com/postil-dev/postil-cli/releases/download/$CLI_RELEASE"
 
-          curl -fsSL -o "$DEST/postil.tar.gz" "$base/postil-$target.tar.gz"
-          curl -fsSL -o "$DEST/postil.tar.gz.sha256" "$base/postil-$target.tar.gz.sha256"
-          curl -fsSL -o "$DEST/postil.tar.gz.sig" "$base/postil-$target.tar.gz.sig"
-          curl -fsSL -o "$DEST/postil.tar.gz.pem" "$base/postil-$target.tar.gz.pem"
+          if ! curl -fsSL -o "$DEST/postil.tar.gz" "$base/postil-$TARGET.tar.gz" \
+             || ! curl -fsSL -o "$DEST/postil.tar.gz.sha256" "$base/postil-$TARGET.tar.gz.sha256" \
+             || ! curl -fsSL -o "$DEST/postil.tar.gz.sig" "$base/postil-$TARGET.tar.gz.sig" \
+             || ! curl -fsSL -o "$DEST/postil.tar.gz.pem" "$base/postil-$TARGET.tar.gz.pem"; then
+            if [ "$ARTIFACT_REQUIRED" = "false" ]; then
+              echo "::notice::no $TARGET artifact on $CLI_RELEASE; the action falls back to a source build for this target"
+              exit 0
+            fi
+            echo "::error::missing required $TARGET artifact on $CLI_RELEASE"
+            exit 1
+          fi
 
           expected=$(awk '{print $1}' "$DEST/postil.tar.gz.sha256")
           actual=$(sha256sum "$DEST/postil.tar.gz" | awk '{print $1}')
@@ -172,7 +192,11 @@ jobs:
 
           tar -xzf "$DEST/postil.tar.gz" -C "$DEST"
           chmod +x "$DEST/postil"
-          "$DEST/postil" --version
+          if [ "$TARGET" = "x86_64-unknown-linux-gnu" ] || [ "$TARGET" = "x86_64-unknown-linux-musl" ]; then
+            "$DEST/postil" --version
+          else
+            file "$DEST/postil"
+          fi
 
           # Boundary: this is as far as the smoke test goes. The action's
           # "Review" step, deliberately not exercised here, takes it from

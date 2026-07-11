@@ -35,6 +35,12 @@ jobs:
 Set `timeout-minutes` on the job: a hung model endpoint or a stuck source build
 should not tie up your runner queue indefinitely.
 
+When `cli-release` is set, Linux runners fetch a verified prebuilt CLI when one
+matches the runner. The action supports glibc and Alpine/musl runners with
+`bash`, `curl`, `jq`, `tar`, and checksum tools available on `x86_64` and
+`aarch64`/`arm64`; unsupported platforms fall back to building the CLI from the
+pinned `cli-ref`.
+
 > **Note:** there is no `@v1` tag yet — this action has not had a tagged
 > release. Until one is published, pin the action to a reviewed commit SHA
 > (`postil-dev/postil-action@<40-hex sha>`) instead of `@v1`. Pinning to a SHA
