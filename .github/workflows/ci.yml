@@ -122,6 +122,57 @@ jobs:
           # follow at lint time; not a real finding.
           shellcheck --shell=bash --exclude=SC1091 "${scripts[@]}"
 
+  commit-signature-verification:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Signed postil-cli commit verifies
+        env:
+          CLI_REF: e448377c918c1d6fb91f9347d8be5153a4518480
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$RUNNER_TEMP/postil-gnupg"
+          install -m 700 -d "$GNUPGHOME"
+          curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 https://github.com/web-flow.gpg | gpg --batch --import
+
+          verify_repo="$RUNNER_TEMP/postil-cli-signature"
+          rm -rf "$verify_repo"
+          git init -q "$verify_repo"
+          git -C "$verify_repo" fetch --quiet --depth=1 https://github.com/postil-dev/postil-cli "$CLI_REF"
+          git -C "$verify_repo" verify-commit "$CLI_REF"
+
+      - name: Unsigned commit fails with clear error
+        run: |
+          set -euo pipefail
+          unsigned_repo="$RUNNER_TEMP/unsigned-source"
+          git init -q "$unsigned_repo"
+          git -C "$unsigned_repo" config user.name "Unsigned Commit"
+          git -C "$unsigned_repo" config user.email "unsigned@example.invalid"
+          git -C "$unsigned_repo" -c commit.gpgsign=false commit --quiet --allow-empty -m "unsigned fixture"
+          CLI_REF="$(git -C "$unsigned_repo" rev-parse HEAD)"
+
+          verify_repo="$RUNNER_TEMP/unsigned-signature"
+          rm -rf "$verify_repo"
+          git init -q "$verify_repo"
+          git -C "$verify_repo" fetch --quiet --depth=1 "$unsigned_repo" "$CLI_REF"
+
+          log="$RUNNER_TEMP/unsigned-verify.log"
+          set +e
+          (
+            if ! git -C "$verify_repo" verify-commit "$CLI_REF"; then
+              echo "::error::postil-cli commit $CLI_REF is not signed by a trusted key, or git cannot access the signer's public key. Import the signer's public key before using source builds."
+              exit 42
+            fi
+          ) >"$log" 2>&1
+          status=$?
+          set -e
+
+          if [ "$status" -ne 42 ]; then
+            cat "$log"
+            echo "::error::unsigned commit verification exited with status $status, expected 42"
+            exit 1
+          fi
+          grep -F "is not signed by a trusted key, or git cannot access the signer's public key" "$log"
+
   # The action has three composite steps: "Validate inputs", "Install
   # postil" (fetch + cosign-verify the pinned CLI, or build from source),
   # and "Review" (the actual LLM call). They are not separable via `uses:`
