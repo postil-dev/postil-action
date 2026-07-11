@@ -107,12 +107,46 @@ runs:
       if: inputs.cli-release != ''
       uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
+    - name: Select postil target
+      id: target
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        target=""
+        if [ "$RUNNER_OS" = "Linux" ]; then
+          libc="gnu"
+          if command -v ldd >/dev/null 2>&1; then
+            ldd_output="$(ldd --version 2>&1 || true)"
+            if printf '%s\n' "$ldd_output" | grep -qi musl; then
+              libc="musl"
+            fi
+          elif [ "$libc" != "musl" ] \
+            && { compgen -G "/lib/ld-musl-*.so.1" >/dev/null \
+              || compgen -G "/usr/lib/ld-musl-*.so.1" >/dev/null; }; then
+            libc="musl"
+          fi
+
+          case "$(uname -m)" in
+            x86_64) target="x86_64-unknown-linux-$libc" ;;
+            aarch64|arm64) target="aarch64-unknown-linux-$libc" ;;
+          esac
+        fi
+
+        if [ -n "$target" ]; then
+          echo "Selected postil target $target"
+        else
+          echo "::notice::no prebuilt target for $RUNNER_OS/$(uname -m); falling back to source build"
+        fi
+        echo "target=$target" >> "$GITHUB_OUTPUT"
+
     - name: Install postil
       shell: bash
       env:
         CLI_REF: ${{ inputs.cli-ref }}
         CLI_RELEASE: ${{ inputs.cli-release }}
         GH_TOKEN: ${{ inputs.github-token }}
+        POSTIL_TARGET: ${{ steps.target.outputs.target }}
       run: |
         set -euo pipefail
         DEST="$RUNNER_TEMP/postil-bin"
@@ -133,13 +167,7 @@ runs:
           if [ "$tag_sha" = "$CLI_REF" ]; then
             # Prebuilt artifacts are Linux-only here; other runners fall back
             # to the source build rather than fetching a binary that cannot run.
-            target=""
-            if [ "$RUNNER_OS" = "Linux" ]; then
-              case "$(uname -m)" in
-                x86_64) target="x86_64-unknown-linux-gnu" ;;
-                aarch64|arm64) target="aarch64-unknown-linux-gnu" ;;
-              esac
-            fi
+            target="$POSTIL_TARGET"
             if [ -n "$target" ]; then
               base="https://github.com/postil-dev/postil-cli/releases/download/$CLI_RELEASE"
               if curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz" "$base/postil-$target.tar.gz" \
@@ -168,8 +196,6 @@ runs:
               else
                 echo "::warning::no prebuilt artifact (or signature) for $target on $CLI_RELEASE; falling back to source build"
               fi
-            else
-              echo "::notice::no prebuilt target for $RUNNER_OS/$(uname -m); falling back to source build"
             fi
           else
             echo "::warning::release $CLI_RELEASE points at ${tag_sha:-unknown}, not cli-ref $CLI_REF; falling back to source build"
@@ -178,6 +204,20 @@ runs:
 
         if [ "$prebuilt_ok" = false ]; then
           echo "Building postil from postil-dev/postil-cli@$CLI_REF"
+          verify_repo="$RUNNER_TEMP/postil-cli-signature"
+          rm -rf "$verify_repo"
+          git init -q "$verify_repo"
+          if ! git -C "$verify_repo" fetch --quiet --depth=1 https://github.com/postil-dev/postil-cli "$CLI_REF"; then
+            echo "::error::failed to fetch postil-cli commit $CLI_REF for signature verification"
+            exit 1
+          fi
+          # Source builds use Git's built-in GPG verification. The runner's
+          # git/GPG config must be able to resolve the signer's public key,
+          # for example from a keyserver or repository .git/config.
+          if ! git -C "$verify_repo" verify-commit "$CLI_REF"; then
+            echo "::error::postil-cli commit $CLI_REF is not signed by a trusted key, or git cannot access the signer's public key. Import the signer's public key before using source builds."
+            exit 1
+          fi
           if ! command -v cargo >/dev/null 2>&1; then
             curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 https://sh.rustup.rs | sh -s -- -y --profile minimal
             . "$HOME/.cargo/env"

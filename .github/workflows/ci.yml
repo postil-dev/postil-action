@@ -122,6 +122,57 @@ jobs:
           # follow at lint time; not a real finding.
           shellcheck --shell=bash --exclude=SC1091 "${scripts[@]}"
 
+  commit-signature-verification:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Signed postil-cli commit verifies
+        env:
+          CLI_REF: e448377c918c1d6fb91f9347d8be5153a4518480
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$RUNNER_TEMP/postil-gnupg"
+          install -m 700 -d "$GNUPGHOME"
+          curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 https://github.com/web-flow.gpg | gpg --batch --import
+
+          verify_repo="$RUNNER_TEMP/postil-cli-signature"
+          rm -rf "$verify_repo"
+          git init -q "$verify_repo"
+          git -C "$verify_repo" fetch --quiet --depth=1 https://github.com/postil-dev/postil-cli "$CLI_REF"
+          git -C "$verify_repo" verify-commit "$CLI_REF"
+
+      - name: Unsigned commit fails with clear error
+        run: |
+          set -euo pipefail
+          unsigned_repo="$RUNNER_TEMP/unsigned-source"
+          git init -q "$unsigned_repo"
+          git -C "$unsigned_repo" config user.name "Unsigned Commit"
+          git -C "$unsigned_repo" config user.email "unsigned@example.invalid"
+          git -C "$unsigned_repo" -c commit.gpgsign=false commit --quiet --allow-empty -m "unsigned fixture"
+          CLI_REF="$(git -C "$unsigned_repo" rev-parse HEAD)"
+
+          verify_repo="$RUNNER_TEMP/unsigned-signature"
+          rm -rf "$verify_repo"
+          git init -q "$verify_repo"
+          git -C "$verify_repo" fetch --quiet --depth=1 "$unsigned_repo" "$CLI_REF"
+
+          log="$RUNNER_TEMP/unsigned-verify.log"
+          set +e
+          (
+            if ! git -C "$verify_repo" verify-commit "$CLI_REF"; then
+              echo "::error::postil-cli commit $CLI_REF is not signed by a trusted key, or git cannot access the signer's public key. Import the signer's public key before using source builds."
+              exit 42
+            fi
+          ) >"$log" 2>&1
+          status=$?
+          set -e
+
+          if [ "$status" -ne 42 ]; then
+            cat "$log"
+            echo "::error::unsigned commit verification exited with status $status, expected 42"
+            exit 1
+          fi
+          grep -F "is not signed by a trusted key, or git cannot access the signer's public key" "$log"
+
   # The action has three composite steps: "Validate inputs", "Install
   # postil" (fetch + cosign-verify the pinned CLI, or build from source),
   # and "Review" (the actual LLM call). They are not separable via `uses:`
@@ -140,6 +191,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
@@ -147,17 +204,17 @@ jobs:
         env:
           CLI_REF: 87f4bf08b63712d3600030a7c458f0b790cfc0d5 # postil-cli v0.1.1
           CLI_RELEASE: v0.1.1
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           DEST="$RUNNER_TEMP/postil-bin"
           mkdir -p "$DEST"
-          target="x86_64-unknown-linux-gnu"
           base="https://github.com/postil-dev/postil-cli/releases/download/$CLI_RELEASE"
 
-          curl -fsSL -o "$DEST/postil.tar.gz" "$base/postil-$target.tar.gz"
-          curl -fsSL -o "$DEST/postil.tar.gz.sha256" "$base/postil-$target.tar.gz.sha256"
-          curl -fsSL -o "$DEST/postil.tar.gz.sig" "$base/postil-$target.tar.gz.sig"
-          curl -fsSL -o "$DEST/postil.tar.gz.pem" "$base/postil-$target.tar.gz.pem"
+          curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz" "$base/postil-$TARGET.tar.gz"
+          curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz.sha256" "$base/postil-$TARGET.tar.gz.sha256"
+          curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz.sig" "$base/postil-$TARGET.tar.gz.sig"
+          curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz.pem" "$base/postil-$TARGET.tar.gz.pem"
 
           expected=$(awk '{print $1}' "$DEST/postil.tar.gz.sha256")
           actual=$(sha256sum "$DEST/postil.tar.gz" | awk '{print $1}')

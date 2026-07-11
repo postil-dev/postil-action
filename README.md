@@ -46,6 +46,22 @@ gate without failing this job, set `soft-fail: true` and mark the `postil/gate` 
 required in branch protection instead — that is the recommended setup: advisory comments
 never block, the gate check does.
 
+## Platform support
+
+Linux runners use prebuilt CLI release artifacts when `cli-release` is set and
+the release tag points at the pinned `cli-ref`. The action selects the target
+from the runner CPU and libc:
+
+| Runner | Selected target |
+|---|---|
+| x86_64 glibc Linux | `x86_64-unknown-linux-gnu` |
+| aarch64 glibc Linux | `aarch64-unknown-linux-gnu` |
+| x86_64 Alpine/musl Linux | `x86_64-unknown-linux-musl` |
+| aarch64 Alpine/musl Linux | `aarch64-unknown-linux-musl` |
+
+If a matching prebuilt artifact is not present on the pinned CLI release, the
+action falls back to building `postil` from `cli-ref`.
+
 ## Inputs
 
 | Input | Required | Description |
