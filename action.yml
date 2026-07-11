@@ -203,6 +203,20 @@ runs:
 
         if [ "$prebuilt_ok" = false ]; then
           echo "Building postil from postil-dev/postil-cli@$CLI_REF"
+          verify_repo="$RUNNER_TEMP/postil-cli-signature"
+          rm -rf "$verify_repo"
+          git init -q "$verify_repo"
+          if ! git -C "$verify_repo" fetch --quiet --depth=1 https://github.com/postil-dev/postil-cli "$CLI_REF"; then
+            echo "::error::failed to fetch postil-cli commit $CLI_REF for signature verification"
+            exit 1
+          fi
+          # Source builds use Git's built-in GPG verification. The runner's
+          # git/GPG config must be able to resolve the signer's public key,
+          # for example from a keyserver or repository .git/config.
+          if ! git -C "$verify_repo" verify-commit "$CLI_REF"; then
+            echo "::error::postil-cli commit $CLI_REF is not signed by a trusted key, or git cannot access the signer's public key. Import the signer's public key before using source builds."
+            exit 1
+          fi
           if ! command -v cargo >/dev/null 2>&1; then
             curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 https://sh.rustup.rs | sh -s -- -y --profile minimal
             . "$HOME/.cargo/env"
