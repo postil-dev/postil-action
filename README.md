@@ -1,16 +1,14 @@
-# postil-action
+# Postil Action
 
-GitHub Action for [Postil](https://postil.dev): a low-noise AI review gate that stays
-silent on clean PRs and fails a dedicated `postil/gate` check on real risk.
+Run [Postil](https://postil.dev) as a quiet pull-request review gate in GitHub Actions. Clean changes receive no review comment. Gate-level findings fail the job and the separate `postil/gate` check.
 
-This is a thin composite action. All review logic lives in the
-[`postil` CLI](https://github.com/postil-dev/postil-cli), installed at the commit SHA
-you pin — the action contains no JavaScript and no Docker image.
+This composite action installs a pinned, signed [`postil` CLI](https://github.com/postil-dev/postil-cli) build. The action contains no separate review engine.
 
 ## Usage
 
 ```yaml
-name: review
+name: postil
+
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -21,69 +19,50 @@ permissions:
   checks: write
 
 jobs:
-  postil:
+  review:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: postil-dev/postil-action@v1
+      - uses: postil-dev/postil-action@9c8cf2c2f650f5946774c6d01626da507836b418
         with:
-          cli-ref: 87f4bf08b63712d3600030a7c458f0b790cfc0d5   # postil-cli v0.1.1
-          cli-release: v0.1.1          # optional: prebuilt binary (must match cli-ref)
+          cli-ref: dd1381381d4791475a277333837394f2f5032d27
+          cli-release: v0.6.0
           api-key: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 
-Set `timeout-minutes` on the job: a hung model endpoint or a stuck source build
-should not tie up your runner queue indefinitely.
-
-When `cli-release` is set, Linux runners fetch a verified prebuilt CLI when one
-matches the runner. The action supports glibc and Alpine/musl runners with
-`bash`, `curl`, `jq`, `tar`, and checksum tools available on `x86_64` and
-`aarch64`/`arm64`; unsupported platforms fall back to building the CLI from the
-pinned `cli-ref`.
-
-> **Note:** there is no `@v1` tag yet — this action has not had a tagged
-> release. Until one is published, pin the action to a reviewed commit SHA
-> (`postil-dev/postil-action@<40-hex sha>`) instead of `@v1`. Pinning to a SHA
-> is the recommended practice for third-party actions regardless; switch to
-> `@v1` once the first tag ships.
-
-The job fails when the gate fails (severity `error` findings by default). To require the
-gate without failing this job, set `soft-fail: true` and mark the `postil/gate` check as
-required in branch protection instead — that is the recommended setup: advisory comments
-never block, the gate check does.
+Pin both repositories to immutable commit SHAs. `cli-release` selects a prebuilt binary only when the release resolves to `cli-ref` and its checksum and Sigstore signature verify. Source fallback requires the runner's Git and GPG configuration to trust the CLI signing key; the action fails closed when it cannot verify the pinned commit.
 
 ## Inputs
 
-| Input | Required | Description |
-|---|---|---|
-| `cli-ref` | yes | Full 40-hex commit SHA of `postil-dev/postil-cli`. Tags/branches are rejected: they are mutable, and this binary posts to your PRs. |
-| `cli-release` | no | Release tag for a prebuilt binary. Verified to point at `cli-ref` and checksum-checked; any mismatch falls back to building from source. |
-| `api-key` | yes | Key for your model endpoint. Postil never proxies or marks up inference. |
-| `api-base` | no | Any OpenAI-compatible endpoint (OpenRouter default; Ollama, vLLM, Azure OpenAI). |
-| `model`, `model-cascade` | no | Model override and comma-separated fallbacks. |
-| `fail-on` | no | `info`/`warn`/`error`/`never` — overrides `gate.failOn` from repo config. |
-| `config` | no | Explicit config path; otherwise `.postil.yaml` > `.coderabbit.yaml`. |
-| `pr` | no | PR number; defaults to the triggering `pull_request` event. |
-| `since-sha`, `baseline` | no | Incremental re-review (see CLI docs). |
-| `soft-fail` | no | Report findings without failing the job. |
-| `sarif-path` | no | Write SARIF 2.1.0 here, for upload via `github/codeql-action/upload-sarif`. |
-| `github-token` | no | Defaults to `github.token`. Needs `pull-requests: write` and `checks: write`. |
+| Input | Required | Purpose |
+| --- | --- | --- |
+| `cli-ref` | yes | Full 40-character `postil-cli` commit SHA |
+| `api-key` | yes | Model provider credential |
+| `cli-release` | no | Matching signed release tag for a prebuilt Linux binary |
+| `api-base` | no | OpenAI-compatible model endpoint |
+| `model` | no | Primary model override |
+| `model-cascade` | no | Comma-separated fallback models |
+| `fail-on` | no | `info`, `warn`, `error`, or `never` |
+| `config` | no | Explicit Postil configuration path |
+| `pr` | no | Pull-request number when not inferred from the event |
+| `since-sha`, `baseline` | no | Incremental review inputs |
+| `soft-fail` | no | Report findings without failing the job |
+| `sarif-path` | no | Write SARIF 2.1.0 for code-scanning upload |
+| `github-token` | no | Forge token, defaulting to `github.token` |
 
-## Outputs
+Outputs are `envelope-path`, `gate-failing`, and `sarif-path`.
 
-- `envelope-path`: path to the review envelope JSON.
-- `gate-failing`: `true` when gate-level findings exist.
-- `sarif-path`: path to the SARIF file, set only when `sarif-path` was requested and the file was written.
+## Gate setup
 
-## Security notes
+Postil publishes an advisory `postil/review` check and a blocking `postil/gate` check. Mark only `postil/gate` as required in branch protection. `soft-fail: true` keeps the workflow job green, but does not change the dedicated gate check.
 
-- **Never use `pull_request_target` with a checkout of the PR head.** Postil does not
-  need the PR code checked out at all — it reads the diff via the API. If your workflow
-  must use `pull_request_target` (e.g. to access secrets on forked PRs), do not add a
-  `actions/checkout` of `github.event.pull_request.head.sha`, and never build or execute
-  PR code in the same job that holds your API key.
-- Pinning `cli-ref` to a full SHA means the reviewed binary cannot change underneath you.
-- The default `github.token` is scoped to the repository and expires with the job.
+## Security
+
+Do not combine `pull_request_target`, a checkout of untrusted pull-request code, and repository secrets. Postil can read a remote diff through the GitHub API and does not need to execute pull-request code.
+
+The default `github.token` is repository-scoped and expires with the job. The model credential is passed directly to the configured provider.
+
+Configuration, output formats, and forge behavior are documented in the [Postil CLI repository](https://github.com/postil-dev/postil-cli).
 
 ## License
 
