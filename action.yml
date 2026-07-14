@@ -23,11 +23,27 @@ inputs:
     description: "API key for the model endpoint (OpenRouter by default). Postil never proxies inference."
     required: true
   api-base:
-    description: "OpenAI-compatible endpoint base URL."
+    description: "Model endpoint base URL. Defaults to the CLI provider endpoint."
     required: false
     default: ""
+  api-format:
+    description: "Provider interface: openai-compatible or anthropic."
+    required: false
+    default: ""
+  endpoint-auth-header:
+    description: "Additional private-gateway authentication header name. Must be paired with endpoint-auth-value."
+    required: false
+    default: ""
+  endpoint-auth-value:
+    description: "Additional private-gateway authentication value. Must be paired with endpoint-auth-header."
+    required: false
+    default: ""
+  allow-private-api-base:
+    description: "Permit a local or private-network model endpoint (true/false)."
+    required: false
+    default: "false"
   model:
-    description: "Model to use (defaults to repo config or deepseek/deepseek-v4-pro)."
+    description: "Primary model. Required unless trusted config supplies one."
     required: false
     default: ""
   model-cascade:
@@ -92,6 +108,10 @@ runs:
       env:
         CLI_REF: ${{ inputs.cli-ref }}
         DEPRECATED_REF: ${{ inputs.reviewer-ref }}
+        API_FORMAT: ${{ inputs.api-format }}
+        ENDPOINT_AUTH_HEADER: ${{ inputs.endpoint-auth-header }}
+        ENDPOINT_AUTH_VALUE: ${{ inputs.endpoint-auth-value }}
+        ALLOW_PRIVATE_API_BASE: ${{ inputs.allow-private-api-base }}
       run: |
         set -euo pipefail
         if [ -n "$DEPRECATED_REF" ]; then
@@ -102,6 +122,25 @@ runs:
           echo "::error::cli-ref must be a full 40-character lowercase commit SHA, got '$CLI_REF'"
           exit 1
         fi
+        case "$API_FORMAT" in
+          ""|openai-compatible|anthropic) ;;
+          *)
+            echo "::error::api-format must be 'openai-compatible' or 'anthropic'"
+            exit 1
+            ;;
+        esac
+        if { [ -n "$ENDPOINT_AUTH_HEADER" ] && [ -z "$ENDPOINT_AUTH_VALUE" ]; } \
+          || { [ -z "$ENDPOINT_AUTH_HEADER" ] && [ -n "$ENDPOINT_AUTH_VALUE" ]; }; then
+          echo "::error::endpoint-auth-header and endpoint-auth-value must be set together"
+          exit 1
+        fi
+        case "$ALLOW_PRIVATE_API_BASE" in
+          true|false) ;;
+          *)
+            echo "::error::allow-private-api-base must be 'true' or 'false'"
+            exit 1
+            ;;
+        esac
 
     - name: Install cosign
       if: inputs.cli-release != ''
@@ -159,10 +198,12 @@ runs:
           # Auth header goes through a curl config file, not argv, so the
           # token never shows up in `ps`/`/proc/<pid>/cmdline` on the runner.
           auth_cfg="$RUNNER_TEMP/postil-gh-auth.curlrc"
-          printf 'header = "Authorization: Bearer %s"\n' "$GH_TOKEN" > "$auth_cfg"
+          (umask 077; printf 'header = "Authorization: Bearer %s"\n' "$GH_TOKEN" > "$auth_cfg")
+          trap 'rm -f "$auth_cfg"' EXIT
           tag_sha=$(curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -K "$auth_cfg" \
             "$api/commits/$CLI_RELEASE" | jq -r '.sha' || echo "")
           rm -f "$auth_cfg"
+          trap - EXIT
           if [ "$tag_sha" = "$CLI_REF" ]; then
             # Prebuilt artifacts are Linux-only here; other runners fall back
             # to the source build rather than fetching a binary that cannot run.
@@ -184,7 +225,7 @@ runs:
                     "$DEST/postil.tar.gz" \
                     --signature "$DEST/postil.tar.gz.sig" \
                     --certificate "$DEST/postil.tar.gz.pem" \
-                    --certificate-identity-regexp 'https://github.com/postil-dev/postil-cli/\.github/workflows/release\.yml@refs/tags/.*' \
+                    --certificate-identity "https://github.com/postil-dev/postil-cli/.github/workflows/release.yml@refs/tags/$CLI_RELEASE" \
                     --certificate-oidc-issuer https://token.actions.githubusercontent.com; then
                   tar -xzf "$DEST/postil.tar.gz" -C "$DEST"
                   chmod +x "$DEST/postil"
@@ -210,13 +251,24 @@ runs:
             echo "::error::failed to fetch postil-cli commit $CLI_REF for signature verification"
             exit 1
           fi
-          # Source builds use Git's built-in GPG verification. The runner's
-          # git/GPG config must be able to resolve the signer's public key,
-          # for example from a keyserver or repository .git/config.
-          if ! git -C "$verify_repo" verify-commit "$CLI_REF"; then
+          # Source builds accept only commits signed by the Postil maintainer
+          # or GitHub's web-flow key used for protected squash merges.
+          set +e
+          verify_output=$(git -C "$verify_repo" verify-commit --raw "$CLI_REF" 2>&1)
+          verify_status=$?
+          set -e
+          if [ "$verify_status" -ne 0 ]; then
             echo "::error::postil-cli commit $CLI_REF is not signed by a trusted key, or git cannot access the signer's public key. Import the signer's public key before using source builds."
             exit 1
           fi
+          signer_fingerprint=$(printf '%s\n' "$verify_output" | awk '$1 == "[GNUPG:]" && $2 == "VALIDSIG" { print $3; exit }')
+          case "$signer_fingerprint" in
+            02E45A9532C85D4432AA048151A8809EA950397A|968479A1AFF927E37D1A566BB5690EEEBB952194) ;;
+            *)
+              echo "::error::postil-cli commit $CLI_REF has a valid signature from an untrusted signer"
+              exit 1
+              ;;
+          esac
           if ! command -v cargo >/dev/null 2>&1; then
             curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 https://sh.rustup.rs | sh -s -- -y --profile minimal
             . "$HOME/.cargo/env"
@@ -237,6 +289,10 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         POSTIL_API_KEY: ${{ inputs.api-key }}
         POSTIL_API_BASE: ${{ inputs.api-base }}
+        POSTIL_API_FORMAT: ${{ inputs.api-format }}
+        POSTIL_ENDPOINT_AUTH_HEADER: ${{ inputs.endpoint-auth-header }}
+        POSTIL_ENDPOINT_AUTH_VALUE: ${{ inputs.endpoint-auth-value }}
+        POSTIL_ALLOW_PRIVATE_API_BASE: ${{ inputs.allow-private-api-base }}
         REVIEW_MODEL: ${{ inputs.model }}
         REVIEW_MODEL_CASCADE: ${{ inputs.model-cascade }}
         INPUT_PR: ${{ inputs.pr }}
@@ -257,7 +313,7 @@ runs:
           exit 1
         fi
         ENVELOPE="$RUNNER_TEMP/postil-envelope.json"
-        args=(review --repo "$GITHUB_REPOSITORY" --pr "$PR" --output-json)
+        args=(review --bounded --repo "$GITHUB_REPOSITORY" --pr "$PR" --output-json)
         [ -n "$INPUT_FAIL_ON" ]   && args+=(--fail-on "$INPUT_FAIL_ON")
         [ -n "$INPUT_CONFIG" ]    && args+=(--config "$INPUT_CONFIG")
         [ -n "$INPUT_SINCE_SHA" ] && args+=(--since-sha "$INPUT_SINCE_SHA")
@@ -269,14 +325,6 @@ runs:
         code=$?
         set -e
 
-        echo "envelope-path=$ENVELOPE" >> "$GITHUB_OUTPUT"
-        # Only advertise SARIF that was actually written; a crashed run may
-        # have died before producing it.
-        [ -n "$INPUT_SARIF_PATH" ] && [ -f "$INPUT_SARIF_PATH" ] \
-          && echo "sarif-path=$INPUT_SARIF_PATH" >> "$GITHUB_OUTPUT"
-        gate=$(jq -r '.gate.failing // false' "$ENVELOPE" 2>/dev/null || echo "unknown")
-        echo "gate-failing=$gate" >> "$GITHUB_OUTPUT"
-
         # Fail closed on every outcome except clean (0) and gate-failing (1):
         # a panic (101), timeout (124), or OOM kill (137) must never read as
         # a pass.
@@ -284,6 +332,23 @@ runs:
           echo "::error::postil review did not complete (exit $code)"
           exit "$code"
         fi
+        if ! gate=$(jq -er 'if (.gate.failing | type) == "boolean" then (.gate.failing | tostring) else error("gate.failing must be boolean") end' "$ENVELOPE" 2>/dev/null); then
+          echo "::error::postil review returned an invalid envelope"
+          exit 2
+        fi
+        if { [ "$code" -eq 0 ] && [ "$gate" != false ]; } \
+          || { [ "$code" -eq 1 ] && [ "$gate" != true ]; }; then
+          echo "::error::postil review exit status and gate verdict disagree"
+          exit 2
+        fi
+
+        echo "envelope-path=$ENVELOPE" >> "$GITHUB_OUTPUT"
+        # Only advertise SARIF that was actually written; a crashed run may
+        # have died before producing it.
+        [ -n "$INPUT_SARIF_PATH" ] && [ -f "$INPUT_SARIF_PATH" ] \
+          && echo "sarif-path=$INPUT_SARIF_PATH" >> "$GITHUB_OUTPUT"
+        echo "gate-failing=$gate" >> "$GITHUB_OUTPUT"
+
         if [ "$code" -eq 1 ] && [ "$INPUT_SOFT_FAIL" != "true" ]; then
           echo "::error::postil gate is failing (see the postil/gate check for details)"
           exit 1
