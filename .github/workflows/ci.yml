@@ -599,7 +599,7 @@ jobs:
             name: fixture/not-contacted
           YAML
           : >"$empty_diff"
-          POSTIL_IGNORE_REPOSITORY_MODEL_CONFIG=1 POSTIL_API_KEY=unused \
+          POSTIL_API_KEY=unused \
             "$DEST/postil" review --bounded --config "$config" \
             --diff-file "$empty_diff" --no-post --output json --output-file "$output"
           jq -e '.gate.failing == false' "$output"
