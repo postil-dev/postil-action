@@ -25,8 +25,8 @@ jobs:
     steps:
       - uses: postil-dev/postil-action@77a3349f41799facba618371fb19726d163ba520
         with:
-          cli-ref: f0228748d00cc5713b02994793826fe4acdaf91f
-          cli-release: v0.6.1
+          cli-ref: 3c5a1b8a0f24a0d71d342b44c6ce64c638830da6
+          cli-release: v0.6.2
           api-key: ${{ secrets.OPENROUTER_API_KEY }}
           model: ${{ vars.POSTIL_REVIEW_MODEL }}
 ```

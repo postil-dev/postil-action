@@ -421,7 +421,7 @@ jobs:
             : >"$case_dir/cargo.log"
             set +e
             PATH="$fake_bin:$PATH" RUNNER_TEMP="$case_dir/temp" RUNNER_OS=Linux \
-            GITHUB_PATH="$case_dir/github-path" CLI_REF="$CLI_REF" CLI_RELEASE=v0.6.1 \
+            GITHUB_PATH="$case_dir/github-path" CLI_REF="$CLI_REF" CLI_RELEASE=v0.6.2 \
             GH_TOKEN=test-token POSTIL_TARGET=x86_64-unknown-linux-gnu \
             RELEASE_TEST_MODE="$mode" FAKE_GIT_LOG="$case_dir/git.log" \
             FAKE_CARGO_LOG="$case_dir/cargo.log" \
@@ -536,9 +536,9 @@ jobs:
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: Fetch, cosign-verify, and smoke test the pinned CLI release
         env:
-          CLI_REF: f0228748d00cc5713b02994793826fe4acdaf91f # postil-cli v0.6.1
-          CLI_RELEASE: v0.6.1
-          EXPECTED_VERSION: postil 0.6.1
+          CLI_REF: 3c5a1b8a0f24a0d71d342b44c6ce64c638830da6 # postil-cli v0.6.2
+          CLI_RELEASE: v0.6.2
+          EXPECTED_VERSION: postil 0.6.2
           TARGET: ${{ matrix.target }}
           GH_TOKEN: ${{ github.token }}
         run: |
