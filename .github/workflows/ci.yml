@@ -209,6 +209,7 @@ jobs:
           cat >"$fake_bin/postil" <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
+          printf '%s\n' "$@" >"$ARGS_LOG"
           if [ -z "${REVIEW_MODEL:-}" ] && [ -z "${INPUT_CONFIG:-}" ]; then
             echo "no review model is configured" >&2
             exit 2
@@ -218,6 +219,7 @@ jobs:
           [ "${POSTIL_ENDPOINT_AUTH_VALUE:-}" = "private-endpoint-secret" ]
           [ "${POSTIL_ALLOW_PRIVATE_API_BASE:-}" = "true" ]
           cat "$FIXTURE_ENVELOPE"
+          exit "${FIXTURE_EXIT:-0}"
           SH
           chmod +x "$fake_bin/postil"
 
@@ -227,6 +229,7 @@ jobs:
           JSON
 
           output="$RUNNER_TEMP/review-outputs.txt"
+          args_log="$RUNNER_TEMP/review-args.txt"
           review_temp="$RUNNER_TEMP/review-success"
           mkdir -p "$review_temp"
           PATH="$fake_bin:$PATH" \
@@ -238,14 +241,84 @@ jobs:
           POSTIL_ALLOW_PRIVATE_API_BASE=true REVIEW_MODEL=qualified/model \
           REVIEW_MODEL_CASCADE='' INPUT_PR=7 INPUT_FAIL_ON='' INPUT_CONFIG='' \
           INPUT_SINCE_SHA='' INPUT_BASELINE='' INPUT_SOFT_FAIL=false \
-          INPUT_SARIF_PATH='' EVENT_PR='' FIXTURE_ENVELOPE="$fixture" \
+          INPUT_SARIF_PATH='' EVENT_PR='' FIXTURE_ENVELOPE="$fixture" ARGS_LOG="$args_log" \
             bash "${review_script[0]}"
           envelope_path=$(awk -F= '$1 == "envelope-path" { print substr($0, index($0, "=") + 1) }' "$output")
           cmp "$fixture" "$envelope_path"
           jq -e '.reviewCoverage == {mode:"bounded",selectedBatches:5,totalBatches:17,plannerFallback:true,nested:{retained:[1,2,3]}}' "$envelope_path"
+          grep -Fx -- '--bounded' "$args_log"
+
+          config_temp="$RUNNER_TEMP/review-config"
+          config_output="$RUNNER_TEMP/config-outputs.txt"
+          config_args="$RUNNER_TEMP/config-args.txt"
+          mkdir -p "$config_temp"
+          PATH="$fake_bin:$PATH" \
+          RUNNER_TEMP="$config_temp" GITHUB_OUTPUT="$config_output" \
+          GITHUB_REPOSITORY=postil-dev/postil-action GITHUB_TOKEN=test-token \
+          POSTIL_API_KEY=test-key POSTIL_API_BASE=https://provider.example/v1 \
+          POSTIL_API_FORMAT=anthropic POSTIL_ENDPOINT_AUTH_HEADER=X-Gateway-Token \
+          POSTIL_ENDPOINT_AUTH_VALUE=private-endpoint-secret \
+          POSTIL_ALLOW_PRIVATE_API_BASE=true REVIEW_MODEL='' \
+          REVIEW_MODEL_CASCADE='' INPUT_PR=7 INPUT_FAIL_ON='' \
+          INPUT_CONFIG=postil.toml INPUT_SINCE_SHA='' INPUT_BASELINE='' \
+          INPUT_SOFT_FAIL=false INPUT_SARIF_PATH='' EVENT_PR='' \
+          FIXTURE_ENVELOPE="$fixture" ARGS_LOG="$config_args" \
+            bash "${review_script[0]}"
+          grep -Fx -- '--bounded' "$config_args"
+          grep -Fx -- '--config' "$config_args"
+          grep -Fx -- 'postil.toml' "$config_args"
+
+          expect_envelope_failure() {
+            failure_fixture="$1"
+            case_name="$2"
+            fixture_exit="$3"
+            expected_error="$4"
+            case_temp="$RUNNER_TEMP/review-invalid-$case_name"
+            case_output="$RUNNER_TEMP/invalid-$case_name-outputs.txt"
+            case_args="$RUNNER_TEMP/invalid-$case_name-args.txt"
+            case_log="$RUNNER_TEMP/invalid-$case_name.log"
+            mkdir -p "$case_temp"
+            set +e
+            PATH="$fake_bin:$PATH" \
+            RUNNER_TEMP="$case_temp" GITHUB_OUTPUT="$case_output" \
+            GITHUB_REPOSITORY=postil-dev/postil-action GITHUB_TOKEN=test-token \
+            POSTIL_API_KEY=test-key POSTIL_API_BASE=https://provider.example/v1 \
+            POSTIL_API_FORMAT=anthropic POSTIL_ENDPOINT_AUTH_HEADER=X-Gateway-Token \
+            POSTIL_ENDPOINT_AUTH_VALUE=private-endpoint-secret \
+            POSTIL_ALLOW_PRIVATE_API_BASE=true REVIEW_MODEL=qualified/model \
+            REVIEW_MODEL_CASCADE='' INPUT_PR=7 INPUT_FAIL_ON='' INPUT_CONFIG='' \
+            INPUT_SINCE_SHA='' INPUT_BASELINE='' INPUT_SOFT_FAIL=false \
+            INPUT_SARIF_PATH='' EVENT_PR='' FIXTURE_ENVELOPE="$failure_fixture" \
+            FIXTURE_EXIT="$fixture_exit" ARGS_LOG="$case_args" \
+              bash "${review_script[0]}" >"$case_log" 2>&1
+            case_status=$?
+            set -e
+            [ "$case_status" -eq 2 ]
+            grep -F "$expected_error" "$case_log"
+            [ ! -s "$case_output" ]
+          }
+
+          invalid_json="$RUNNER_TEMP/invalid-json.txt"
+          missing_gate="$RUNNER_TEMP/missing-gate.json"
+          string_gate="$RUNNER_TEMP/string-gate.json"
+          number_gate="$RUNNER_TEMP/number-gate.json"
+          true_gate="$RUNNER_TEMP/true-gate.json"
+          printf 'not json\n' >"$invalid_json"
+          printf '{"schemaVersion":"1.0","findings":[]}\n' >"$missing_gate"
+          printf '{"gate":{"failing":"false"}}\n' >"$string_gate"
+          printf '{"gate":{"failing":0}}\n' >"$number_gate"
+          printf '{"gate":{"failing":true}}\n' >"$true_gate"
+          expect_envelope_failure "$invalid_json" json 0 "postil review returned an invalid envelope"
+          expect_envelope_failure "$missing_gate" missing-gate 0 "postil review returned an invalid envelope"
+          expect_envelope_failure "$string_gate" string-gate 0 "postil review returned an invalid envelope"
+          expect_envelope_failure "$number_gate" number-gate 0 "postil review returned an invalid envelope"
+          expect_envelope_failure "$true_gate" clean-exit-failing-gate 0 "postil review exit status and gate verdict disagree"
+          expect_envelope_failure "$fixture" failing-exit-clean-gate 1 "postil review exit status and gate verdict disagree"
 
           no_model_temp="$RUNNER_TEMP/review-no-model"
           no_model_output="$RUNNER_TEMP/no-model-outputs.txt"
+          no_model_args="$RUNNER_TEMP/no-model-args.txt"
+          no_model_log="$RUNNER_TEMP/no-model.log"
           mkdir -p "$no_model_temp"
           set +e
           PATH="$fake_bin:$PATH" \
@@ -257,11 +330,12 @@ jobs:
           REVIEW_MODEL='' REVIEW_MODEL_CASCADE='' INPUT_PR=7 INPUT_FAIL_ON='' \
           INPUT_CONFIG='' INPUT_SINCE_SHA='' INPUT_BASELINE='' INPUT_SOFT_FAIL=false \
           INPUT_SARIF_PATH='' EVENT_PR='' FIXTURE_ENVELOPE="$fixture" \
-            bash "${review_script[0]}" >"$RUNNER_TEMP/no-model.log" 2>&1
+          ARGS_LOG="$no_model_args" \
+            bash "${review_script[0]}" >"$no_model_log" 2>&1
           status=$?
           set -e
           [ "$status" -eq 2 ]
-          grep -F "postil review did not complete (exit 2)" "$RUNNER_TEMP/no-model.log"
+          grep -F "postil review did not complete (exit 2)" "$no_model_log"
 
       - name: Fall back safely for missing or tampered release bundles
         run: |
@@ -314,7 +388,11 @@ jobs:
           set -euo pipefail
           printf '%s\n' "$*" >>"$FAKE_GIT_LOG"
           if [[ "$*" == *"verify-commit"* ]] && [ "$RELEASE_TEST_MODE" = "untrusted" ]; then
-            exit 1
+            printf '%s\n' '[GNUPG:] VALIDSIG 1111111111111111111111111111111111111111 2026-07-14 0 4 0 1 10 00 1111111111111111111111111111111111111111' >&2
+            exit 0
+          fi
+          if [[ "$*" == *"verify-commit"* ]]; then
+            printf '%s\n' '[GNUPG:] VALIDSIG 02E45A9532C85D4432AA048151A8809EA950397A 2026-07-14 0 4 0 1 10 00 02E45A9532C85D4432AA048151A8809EA950397A' >&2
           fi
           exit 0
           SH
@@ -353,13 +431,13 @@ jobs:
 
             if [ "$mode" = "untrusted" ]; then
               [ "$status" -ne 0 ]
-              grep -F "is not signed by a trusted key" "$case_dir/output.log"
+              grep -F "valid signature from an untrusted signer" "$case_dir/output.log"
               [ ! -s "$case_dir/cargo.log" ]
               return
             fi
 
             [ "$status" -eq 0 ]
-            grep -F "verify-commit $CLI_REF" "$case_dir/git.log"
+            grep -F "verify-commit --raw $CLI_REF" "$case_dir/git.log"
             grep -F -- "--rev $CLI_REF" "$case_dir/cargo.log"
             if [ "$mode" = "missing" ]; then
               grep -F "no prebuilt artifact (or signature)" "$case_dir/output.log"
@@ -377,7 +455,7 @@ jobs:
     steps:
       - name: Signed postil-cli commit verifies
         env:
-          CLI_REF: e448377c918c1d6fb91f9347d8be5153a4518480
+          CLI_REF: f0228748d00cc5713b02994793826fe4acdaf91f
         run: |
           set -euo pipefail
           export GNUPGHOME="$RUNNER_TEMP/postil-gnupg"
@@ -458,9 +536,9 @@ jobs:
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: Fetch, cosign-verify, and smoke test the pinned CLI release
         env:
-          CLI_REF: dd1381381d4791475a277333837394f2f5032d27 # postil-cli v0.6.0
-          CLI_RELEASE: v0.6.0
-          EXPECTED_VERSION: postil 0.6.0
+          CLI_REF: f0228748d00cc5713b02994793826fe4acdaf91f # postil-cli v0.6.1
+          CLI_RELEASE: v0.6.1
+          EXPECTED_VERSION: postil 0.6.1
           TARGET: ${{ matrix.target }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -485,13 +563,46 @@ jobs:
             "$DEST/postil.tar.gz" \
             --signature "$DEST/postil.tar.gz.sig" \
             --certificate "$DEST/postil.tar.gz.pem" \
-            --certificate-identity-regexp 'https://github.com/postil-dev/postil-cli/\.github/workflows/release\.yml@refs/tags/.*' \
+            --certificate-identity "https://github.com/postil-dev/postil-cli/.github/workflows/release.yml@refs/tags/$CLI_RELEASE" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
           tar -xzf "$DEST/postil.tar.gz" -C "$DEST"
           chmod +x "$DEST/postil"
           actual_version=$("$DEST/postil" --version)
           [ "$actual_version" = "$EXPECTED_VERSION" ]
+
+          "$DEST/postil" review --help | grep -F -- '--bounded'
+
+          no_model_diff="$DEST/no-model.diff"
+          cat >"$no_model_diff" <<'DIFF'
+          diff --git a/src/example.rs b/src/example.rs
+          new file mode 100644
+          --- /dev/null
+          +++ b/src/example.rs
+          @@ -0,0 +1 @@
+          +pub fn example() {}
+          DIFF
+          set +e
+          env -u REVIEW_MODEL -u MODEL_API_KEY -u OPENROUTER_API_KEY \
+            POSTIL_IGNORE_REPOSITORY_MODEL_CONFIG=1 \
+            "$DEST/postil" review --bounded --diff-file "$no_model_diff" --no-post \
+            >"$DEST/no-model.log" 2>&1
+          no_model_status=$?
+          set -e
+          [ "$no_model_status" -eq 2 ]
+
+          config="$DEST/postil.yaml"
+          empty_diff="$DEST/empty.diff"
+          output="$DEST/config-envelope.json"
+          cat >"$config" <<'YAML'
+          model:
+            name: fixture/not-contacted
+          YAML
+          : >"$empty_diff"
+          POSTIL_IGNORE_REPOSITORY_MODEL_CONFIG=1 POSTIL_API_KEY=unused \
+            "$DEST/postil" review --bounded --config "$config" \
+            --diff-file "$empty_diff" --no-post --output json --output-file "$output"
+          jq -e '.gate.failing == false' "$output"
 
           # Boundary: this is as far as the smoke test goes. The action's
           # "Review" step, deliberately not exercised here, takes it from
