@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: postil-dev/postil-action@9c8cf2c2f650f5946774c6d01626da507836b418
+      - uses: postil-dev/postil-action@77a3349f41799facba618371fb19726d163ba520
         with:
           cli-ref: f0228748d00cc5713b02994793826fe4acdaf91f
           cli-release: v0.6.1
