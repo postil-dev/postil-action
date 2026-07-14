@@ -30,7 +30,7 @@ jobs:
           api-key: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 
-Pin both repositories to immutable commit SHAs. `cli-release` selects a prebuilt binary only when the release resolves to `cli-ref` and its checksum and Sigstore signature verify. Other cases build the signed CLI commit from source.
+Pin both repositories to immutable commit SHAs. `cli-release` selects a prebuilt binary only when the release resolves to `cli-ref` and its checksum and Sigstore signature verify. Source fallback requires the runner's Git and GPG configuration to trust the CLI signing key; the action fails closed when it cannot verify the pinned commit.
 
 ## Inputs
 
