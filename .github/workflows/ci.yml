@@ -122,6 +122,256 @@ jobs:
           # follow at lint time; not a real finding.
           shellcheck --shell=bash --exclude=SC1091 "${scripts[@]}"
 
+  self-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Extract composite scripts
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/action-scripts"
+          python3 - <<'PY'
+          import os
+          import re
+          import yaml
+
+          with open("action.yml") as source:
+              action = yaml.safe_load(source)
+
+          outdir = os.path.join(os.environ["RUNNER_TEMP"], "action-scripts")
+          for index, step in enumerate(action["runs"]["steps"]):
+              script = step.get("run")
+              if not script:
+                  continue
+              slug = re.sub(r"[^a-zA-Z0-9]", "-", step.get("name", f"step-{index}"))
+              path = os.path.join(outdir, f"{index}-{slug}.sh")
+              with open(path, "w") as output:
+                  output.write(script if script.endswith("\n") else script + "\n")
+          PY
+
+      - name: Reject invalid provider input without exposing credentials
+        run: |
+          set -euo pipefail
+          validate_script=("$RUNNER_TEMP"/action-scripts/*-Validate-inputs.sh)
+          [ "${#validate_script[@]}" -eq 1 ]
+          CLI_REF=0123456789abcdef0123456789abcdef01234567
+
+          env CLI_REF="$CLI_REF" DEPRECATED_REF='' API_FORMAT='' \
+            ENDPOINT_AUTH_HEADER='' ENDPOINT_AUTH_VALUE='' \
+            ALLOW_PRIVATE_API_BASE=false bash "${validate_script[0]}"
+          env CLI_REF="$CLI_REF" DEPRECATED_REF='' API_FORMAT=anthropic \
+            ENDPOINT_AUTH_HEADER=X-Gateway-Token \
+            ENDPOINT_AUTH_VALUE=private-value-never-log \
+            ALLOW_PRIVATE_API_BASE=true bash "${validate_script[0]}"
+
+          expect_failure() {
+            expected="$1"
+            shift
+            log="$RUNNER_TEMP/validation-error.log"
+            set +e
+            "$@" >"$log" 2>&1
+            status=$?
+            set -e
+            [ "$status" -ne 0 ]
+            grep -F "$expected" "$log"
+            if grep -F "private-value-never-log" "$log"; then
+              echo "::error::endpoint authentication value appeared in validation output"
+              exit 1
+            fi
+          }
+
+          expect_failure "api-format must be" env \
+            CLI_REF="$CLI_REF" DEPRECATED_REF='' API_FORMAT=messages \
+            ENDPOINT_AUTH_HEADER='' ENDPOINT_AUTH_VALUE='' \
+            ALLOW_PRIVATE_API_BASE=false bash "${validate_script[0]}"
+          expect_failure "must be set together" env \
+            ENDPOINT_AUTH_HEADER=X-Gateway-Token \
+            ENDPOINT_AUTH_VALUE='' \
+            CLI_REF="$CLI_REF" DEPRECATED_REF='' API_FORMAT='' \
+            ALLOW_PRIVATE_API_BASE=false bash "${validate_script[0]}"
+          expect_failure "must be set together" env \
+            ENDPOINT_AUTH_HEADER='' \
+            ENDPOINT_AUTH_VALUE=private-value-never-log \
+            CLI_REF="$CLI_REF" DEPRECATED_REF='' API_FORMAT='' \
+            ALLOW_PRIVATE_API_BASE=false bash "${validate_script[0]}"
+          expect_failure "allow-private-api-base must be" env \
+            CLI_REF="$CLI_REF" DEPRECATED_REF='' API_FORMAT='' \
+            ENDPOINT_AUTH_HEADER='' ENDPOINT_AUTH_VALUE='' \
+            ALLOW_PRIVATE_API_BASE=1 bash "${validate_script[0]}"
+
+      - name: Preserve the complete envelope and fail closed without a model
+        run: |
+          set -euo pipefail
+          review_script=("$RUNNER_TEMP"/action-scripts/*-Review.sh)
+          [ "${#review_script[@]}" -eq 1 ]
+          fake_bin="$RUNNER_TEMP/fake-review-bin"
+          mkdir -p "$fake_bin"
+          cat >"$fake_bin/postil" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [ -z "${REVIEW_MODEL:-}" ] && [ -z "${INPUT_CONFIG:-}" ]; then
+            echo "no review model is configured" >&2
+            exit 2
+          fi
+          [ "${POSTIL_API_FORMAT:-}" = "anthropic" ]
+          [ "${POSTIL_ENDPOINT_AUTH_HEADER:-}" = "X-Gateway-Token" ]
+          [ "${POSTIL_ENDPOINT_AUTH_VALUE:-}" = "private-endpoint-secret" ]
+          [ "${POSTIL_ALLOW_PRIVATE_API_BASE:-}" = "true" ]
+          cat "$FIXTURE_ENVELOPE"
+          SH
+          chmod +x "$fake_bin/postil"
+
+          fixture="$RUNNER_TEMP/envelope-fixture.json"
+          cat >"$fixture" <<'JSON'
+          {"schemaVersion":"1.0","gate":{"failing":false},"findings":[],"reviewCoverage":{"mode":"bounded","selectedBatches":5,"totalBatches":17,"plannerFallback":true,"nested":{"retained":[1,2,3]}}}
+          JSON
+
+          output="$RUNNER_TEMP/review-outputs.txt"
+          review_temp="$RUNNER_TEMP/review-success"
+          mkdir -p "$review_temp"
+          PATH="$fake_bin:$PATH" \
+          RUNNER_TEMP="$review_temp" GITHUB_OUTPUT="$output" \
+          GITHUB_REPOSITORY=postil-dev/postil-action GITHUB_TOKEN=test-token \
+          POSTIL_API_KEY=test-key POSTIL_API_BASE=https://provider.example/v1 \
+          POSTIL_API_FORMAT=anthropic POSTIL_ENDPOINT_AUTH_HEADER=X-Gateway-Token \
+          POSTIL_ENDPOINT_AUTH_VALUE=private-endpoint-secret \
+          POSTIL_ALLOW_PRIVATE_API_BASE=true REVIEW_MODEL=qualified/model \
+          REVIEW_MODEL_CASCADE='' INPUT_PR=7 INPUT_FAIL_ON='' INPUT_CONFIG='' \
+          INPUT_SINCE_SHA='' INPUT_BASELINE='' INPUT_SOFT_FAIL=false \
+          INPUT_SARIF_PATH='' EVENT_PR='' FIXTURE_ENVELOPE="$fixture" \
+            bash "${review_script[0]}"
+          envelope_path=$(awk -F= '$1 == "envelope-path" { print substr($0, index($0, "=") + 1) }' "$output")
+          cmp "$fixture" "$envelope_path"
+          jq -e '.reviewCoverage == {mode:"bounded",selectedBatches:5,totalBatches:17,plannerFallback:true,nested:{retained:[1,2,3]}}' "$envelope_path"
+
+          no_model_temp="$RUNNER_TEMP/review-no-model"
+          no_model_output="$RUNNER_TEMP/no-model-outputs.txt"
+          mkdir -p "$no_model_temp"
+          set +e
+          PATH="$fake_bin:$PATH" \
+          RUNNER_TEMP="$no_model_temp" GITHUB_OUTPUT="$no_model_output" \
+          GITHUB_REPOSITORY=postil-dev/postil-action GITHUB_TOKEN=test-token \
+          POSTIL_API_KEY=test-key POSTIL_API_BASE=https://provider.example/v1 \
+          POSTIL_API_FORMAT=openai-compatible POSTIL_ENDPOINT_AUTH_HEADER='' \
+          POSTIL_ENDPOINT_AUTH_VALUE='' POSTIL_ALLOW_PRIVATE_API_BASE=false \
+          REVIEW_MODEL='' REVIEW_MODEL_CASCADE='' INPUT_PR=7 INPUT_FAIL_ON='' \
+          INPUT_CONFIG='' INPUT_SINCE_SHA='' INPUT_BASELINE='' INPUT_SOFT_FAIL=false \
+          INPUT_SARIF_PATH='' EVENT_PR='' FIXTURE_ENVELOPE="$fixture" \
+            bash "${review_script[0]}" >"$RUNNER_TEMP/no-model.log" 2>&1
+          status=$?
+          set -e
+          [ "$status" -eq 2 ]
+          grep -F "postil review did not complete (exit 2)" "$RUNNER_TEMP/no-model.log"
+
+      - name: Fall back safely for missing or tampered release bundles
+        run: |
+          set -euo pipefail
+          install_script=("$RUNNER_TEMP"/action-scripts/*-Install-postil.sh)
+          [ "${#install_script[@]}" -eq 1 ]
+          CLI_REF=0123456789abcdef0123456789abcdef01234567
+
+          run_case() {
+            mode="$1"
+            case_dir="$RUNNER_TEMP/release-$mode"
+            fake_bin="$case_dir/bin"
+            mkdir -p "$fake_bin"
+
+            cat >"$fake_bin/curl" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          output=""
+          url=""
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              -o) output="$2"; shift 2 ;;
+              -K|--retry|--retry-delay) shift 2 ;;
+              --retry-connrefused|-f|-s|-S|-L|-fsSL) shift ;;
+              *) url="$1"; shift ;;
+            esac
+          done
+          if [[ "$url" == *"/commits/"* ]]; then
+            printf '{"sha":"%s"}\n' "$CLI_REF"
+            exit 0
+          fi
+          if [ "$RELEASE_TEST_MODE" = "missing" ] && [[ "$url" == *.tar.gz ]]; then
+            exit 22
+          fi
+          mkdir -p "$(dirname "$output")"
+          case "$url" in
+            *.tar.gz) printf 'tampered release bytes' >"$output" ;;
+            *.sha256) printf '%064d  postil.tar.gz\n' 0 >"$output" ;;
+            *.sig) printf 'invalid signature\n' >"$output" ;;
+            *.pem) printf 'invalid certificate\n' >"$output" ;;
+            *) exit 22 ;;
+          esac
+          SH
+            cat >"$fake_bin/cosign" <<'SH'
+          #!/usr/bin/env bash
+          exit 1
+          SH
+            cat >"$fake_bin/git" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          printf '%s\n' "$*" >>"$FAKE_GIT_LOG"
+          if [[ "$*" == *"verify-commit"* ]] && [ "$RELEASE_TEST_MODE" = "untrusted" ]; then
+            exit 1
+          fi
+          exit 0
+          SH
+            cat >"$fake_bin/cargo" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          printf '%s\n' "$*" >>"$FAKE_CARGO_LOG"
+          root=""
+          previous=""
+          for argument in "$@"; do
+            if [ "$previous" = "--root" ]; then root="$argument"; fi
+            previous="$argument"
+          done
+          mkdir -p "$root/bin"
+          cat >"$root/bin/postil" <<'BIN'
+          #!/usr/bin/env bash
+          printf 'postil test-build\n'
+          BIN
+          chmod +x "$root/bin/postil"
+          SH
+            chmod +x "$fake_bin"/*
+
+            mkdir -p "$case_dir/temp"
+            : >"$case_dir/github-path"
+            : >"$case_dir/git.log"
+            : >"$case_dir/cargo.log"
+            set +e
+            PATH="$fake_bin:$PATH" RUNNER_TEMP="$case_dir/temp" RUNNER_OS=Linux \
+            GITHUB_PATH="$case_dir/github-path" CLI_REF="$CLI_REF" CLI_RELEASE=v0.6.1 \
+            GH_TOKEN=test-token POSTIL_TARGET=x86_64-unknown-linux-gnu \
+            RELEASE_TEST_MODE="$mode" FAKE_GIT_LOG="$case_dir/git.log" \
+            FAKE_CARGO_LOG="$case_dir/cargo.log" \
+              bash "${install_script[0]}" >"$case_dir/output.log" 2>&1
+            status=$?
+            set -e
+
+            if [ "$mode" = "untrusted" ]; then
+              [ "$status" -ne 0 ]
+              grep -F "is not signed by a trusted key" "$case_dir/output.log"
+              [ ! -s "$case_dir/cargo.log" ]
+              return
+            fi
+
+            [ "$status" -eq 0 ]
+            grep -F "verify-commit $CLI_REF" "$case_dir/git.log"
+            grep -F -- "--rev $CLI_REF" "$case_dir/cargo.log"
+            if [ "$mode" = "missing" ]; then
+              grep -F "no prebuilt artifact (or signature)" "$case_dir/output.log"
+            else
+              grep -F "checksum or signature verification failed" "$case_dir/output.log"
+            fi
+          }
+
+          run_case missing
+          run_case tampered
+          run_case untrusted
+
   commit-signature-verification:
     runs-on: ubuntu-latest
     steps:
@@ -188,7 +438,7 @@ jobs:
   # its install/verify path (same commands, same cosign-verifier invocation)
   # and stops there, before anything that would need an LLM API key.
   smoke-install:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
     strategy:
@@ -196,39 +446,36 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            artifact-required: "true"
+            runner: ubuntu-latest
           - target: x86_64-unknown-linux-musl
-            artifact-required: "true"
+            runner: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
-            artifact-required: "true"
+            runner: ubuntu-24.04-arm
           - target: aarch64-unknown-linux-musl
-            artifact-required: "false"
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: Fetch, cosign-verify, and smoke test the pinned CLI release
         env:
-          CLI_REF: 87f4bf08b63712d3600030a7c458f0b790cfc0d5 # postil-cli v0.1.1
-          CLI_RELEASE: v0.1.1
+          CLI_REF: dd1381381d4791475a277333837394f2f5032d27 # postil-cli v0.6.0
+          CLI_RELEASE: v0.6.0
+          EXPECTED_VERSION: postil 0.6.0
           TARGET: ${{ matrix.target }}
-          ARTIFACT_REQUIRED: ${{ matrix.artifact-required }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           DEST="$RUNNER_TEMP/postil-bin"
           mkdir -p "$DEST"
           base="https://github.com/postil-dev/postil-cli/releases/download/$CLI_RELEASE"
 
-          if ! curl -fsSL -o "$DEST/postil.tar.gz" "$base/postil-$TARGET.tar.gz" \
-             || ! curl -fsSL -o "$DEST/postil.tar.gz.sha256" "$base/postil-$TARGET.tar.gz.sha256" \
-             || ! curl -fsSL -o "$DEST/postil.tar.gz.sig" "$base/postil-$TARGET.tar.gz.sig" \
-             || ! curl -fsSL -o "$DEST/postil.tar.gz.pem" "$base/postil-$TARGET.tar.gz.pem"; then
-            if [ "$ARTIFACT_REQUIRED" = "false" ]; then
-              echo "::notice::no $TARGET artifact on $CLI_RELEASE; the action falls back to a source build for this target"
-              exit 0
-            fi
-            echo "::error::missing required $TARGET artifact on $CLI_RELEASE"
-            exit 1
-          fi
+          tag_sha=$(gh api "repos/postil-dev/postil-cli/commits/$CLI_RELEASE" --jq .sha)
+          [ "$tag_sha" = "$CLI_REF" ]
+
+          curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz" "$base/postil-$TARGET.tar.gz"
+          curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz.sha256" "$base/postil-$TARGET.tar.gz.sha256"
+          curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz.sig" "$base/postil-$TARGET.tar.gz.sig"
+          curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz.pem" "$base/postil-$TARGET.tar.gz.pem"
 
           expected=$(awk '{print $1}' "$DEST/postil.tar.gz.sha256")
           actual=$(sha256sum "$DEST/postil.tar.gz" | awk '{print $1}')
@@ -243,11 +490,8 @@ jobs:
 
           tar -xzf "$DEST/postil.tar.gz" -C "$DEST"
           chmod +x "$DEST/postil"
-          if [ "$TARGET" = "x86_64-unknown-linux-gnu" ] || [ "$TARGET" = "x86_64-unknown-linux-musl" ]; then
-            "$DEST/postil" --version
-          else
-            file "$DEST/postil"
-          fi
+          actual_version=$("$DEST/postil" --version)
+          [ "$actual_version" = "$EXPECTED_VERSION" ]
 
           # Boundary: this is as far as the smoke test goes. The action's
           # "Review" step, deliberately not exercised here, takes it from

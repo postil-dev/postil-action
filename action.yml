@@ -23,11 +23,27 @@ inputs:
     description: "API key for the model endpoint (OpenRouter by default). Postil never proxies inference."
     required: true
   api-base:
-    description: "OpenAI-compatible endpoint base URL."
+    description: "Model endpoint base URL. Defaults to the CLI provider endpoint."
     required: false
     default: ""
+  api-format:
+    description: "Provider interface: openai-compatible or anthropic."
+    required: false
+    default: ""
+  endpoint-auth-header:
+    description: "Additional private-gateway authentication header name. Must be paired with endpoint-auth-value."
+    required: false
+    default: ""
+  endpoint-auth-value:
+    description: "Additional private-gateway authentication value. Must be paired with endpoint-auth-header."
+    required: false
+    default: ""
+  allow-private-api-base:
+    description: "Permit a local or private-network model endpoint (true/false)."
+    required: false
+    default: "false"
   model:
-    description: "Model to use (defaults to repo config or deepseek/deepseek-v4-pro)."
+    description: "Primary model. Defaults to trusted config or an admitted CLI profile; the review fails if none is available."
     required: false
     default: ""
   model-cascade:
@@ -92,6 +108,10 @@ runs:
       env:
         CLI_REF: ${{ inputs.cli-ref }}
         DEPRECATED_REF: ${{ inputs.reviewer-ref }}
+        API_FORMAT: ${{ inputs.api-format }}
+        ENDPOINT_AUTH_HEADER: ${{ inputs.endpoint-auth-header }}
+        ENDPOINT_AUTH_VALUE: ${{ inputs.endpoint-auth-value }}
+        ALLOW_PRIVATE_API_BASE: ${{ inputs.allow-private-api-base }}
       run: |
         set -euo pipefail
         if [ -n "$DEPRECATED_REF" ]; then
@@ -102,6 +122,25 @@ runs:
           echo "::error::cli-ref must be a full 40-character lowercase commit SHA, got '$CLI_REF'"
           exit 1
         fi
+        case "$API_FORMAT" in
+          ""|openai-compatible|anthropic) ;;
+          *)
+            echo "::error::api-format must be 'openai-compatible' or 'anthropic'"
+            exit 1
+            ;;
+        esac
+        if { [ -n "$ENDPOINT_AUTH_HEADER" ] && [ -z "$ENDPOINT_AUTH_VALUE" ]; } \
+          || { [ -z "$ENDPOINT_AUTH_HEADER" ] && [ -n "$ENDPOINT_AUTH_VALUE" ]; }; then
+          echo "::error::endpoint-auth-header and endpoint-auth-value must be set together"
+          exit 1
+        fi
+        case "$ALLOW_PRIVATE_API_BASE" in
+          true|false) ;;
+          *)
+            echo "::error::allow-private-api-base must be 'true' or 'false'"
+            exit 1
+            ;;
+        esac
 
     - name: Install cosign
       if: inputs.cli-release != ''
@@ -237,6 +276,10 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         POSTIL_API_KEY: ${{ inputs.api-key }}
         POSTIL_API_BASE: ${{ inputs.api-base }}
+        POSTIL_API_FORMAT: ${{ inputs.api-format }}
+        POSTIL_ENDPOINT_AUTH_HEADER: ${{ inputs.endpoint-auth-header }}
+        POSTIL_ENDPOINT_AUTH_VALUE: ${{ inputs.endpoint-auth-value }}
+        POSTIL_ALLOW_PRIVATE_API_BASE: ${{ inputs.allow-private-api-base }}
         REVIEW_MODEL: ${{ inputs.model }}
         REVIEW_MODEL_CASCADE: ${{ inputs.model-cascade }}
         INPUT_PR: ${{ inputs.pr }}
