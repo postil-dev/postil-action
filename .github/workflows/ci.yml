@@ -372,8 +372,25 @@ jobs:
           fi
           mkdir -p "$(dirname "$output")"
           case "$url" in
-            *.tar.gz) printf 'tampered release bytes' >"$output" ;;
-            *.sha256) printf '%064d  postil.tar.gz\n' 0 >"$output" ;;
+            *.tar.gz)
+              if [ "$RELEASE_TEST_MODE" = "wrong-workflow-sha" ]; then
+                archive_dir=$(mktemp -d)
+                printf '#!/usr/bin/env bash\nprintf "postil hostile-prebuilt\\n"\n' \
+                  >"$archive_dir/postil"
+                chmod +x "$archive_dir/postil"
+                tar -czf "$output" -C "$archive_dir" postil
+                rm -rf "$archive_dir"
+              else
+                printf 'tampered release bytes' >"$output"
+              fi
+              ;;
+            *.sha256)
+              if [ "$RELEASE_TEST_MODE" = "wrong-workflow-sha" ]; then
+                sha256sum "$(dirname "$output")/postil.tar.gz" >"$output"
+              else
+                printf '%064d  postil.tar.gz\n' 0 >"$output"
+              fi
+              ;;
             *.sig) printf 'invalid signature\n' >"$output" ;;
             *.pem) printf 'invalid certificate\n' >"$output" ;;
             *) exit 22 ;;
@@ -381,18 +398,43 @@ jobs:
           SH
             cat >"$fake_bin/cosign" <<'SH'
           #!/usr/bin/env bash
+          set -euo pipefail
+          printf '%s\n' "$@" >"$FAKE_COSIGN_LOG"
+          if [ "$RELEASE_TEST_MODE" = "wrong-workflow-sha" ]; then
+            while [ "$#" -gt 0 ]; do
+              if [ "$1" = "--certificate-github-workflow-sha" ] \
+                && [ "${2:-}" = "$CLI_REF" ]; then
+                exit 1
+              fi
+              shift
+            done
+            exit 0
+          fi
           exit 1
           SH
             cat >"$fake_bin/git" <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
           printf '%s\n' "$*" >>"$FAKE_GIT_LOG"
-          if [[ "$*" == *"verify-commit"* ]] && [ "$RELEASE_TEST_MODE" = "untrusted" ]; then
-            printf '%s\n' '[GNUPG:] VALIDSIG 1111111111111111111111111111111111111111 2026-07-14 0 4 0 1 10 00 1111111111111111111111111111111111111111' >&2
-            exit 0
-          fi
           if [[ "$*" == *"verify-commit"* ]]; then
-            printf '%s\n' '[GNUPG:] VALIDSIG 02E45A9532C85D4432AA048151A8809EA950397A 2026-07-14 0 4 0 1 10 00 02E45A9532C85D4432AA048151A8809EA950397A' >&2
+            case "$RELEASE_TEST_MODE" in
+              invalid-signature) exit 1 ;;
+              zero-validsig) ;;
+              trusted-subkey)
+                printf '%s\n' '[GNUPG:] VALIDSIG AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 2026-07-14 0 4 0 1 10 00 02E45A9532C85D4432AA048151A8809EA950397A' >&2
+                ;;
+              extra-key)
+                printf '%s\n' '[GNUPG:] VALIDSIG 1111111111111111111111111111111111111111 2026-07-14 0 4 0 1 10 00 1111111111111111111111111111111111111111' >&2
+                ;;
+              multiple-validsig)
+                printf '%s\n' \
+                  '[GNUPG:] VALIDSIG 02E45A9532C85D4432AA048151A8809EA950397A 2026-07-14 0 4 0 1 10 00 02E45A9532C85D4432AA048151A8809EA950397A' \
+                  '[GNUPG:] VALIDSIG 1111111111111111111111111111111111111111 2026-07-14 0 4 0 1 10 00 1111111111111111111111111111111111111111' >&2
+                ;;
+              *)
+                printf '%s\n' '[GNUPG:] VALIDSIG 02E45A9532C85D4432AA048151A8809EA950397A 2026-07-14 0 4 0 1 10 00 02E45A9532C85D4432AA048151A8809EA950397A' >&2
+                ;;
+            esac
           fi
           exit 0
           SH
@@ -419,26 +461,45 @@ jobs:
             : >"$case_dir/github-path"
             : >"$case_dir/git.log"
             : >"$case_dir/cargo.log"
+            : >"$case_dir/cosign.log"
             set +e
             PATH="$fake_bin:$PATH" RUNNER_TEMP="$case_dir/temp" RUNNER_OS=Linux \
             GITHUB_PATH="$case_dir/github-path" CLI_REF="$CLI_REF" CLI_RELEASE=v0.6.2 \
             GH_TOKEN=test-token POSTIL_TARGET=x86_64-unknown-linux-gnu \
             RELEASE_TEST_MODE="$mode" FAKE_GIT_LOG="$case_dir/git.log" \
-            FAKE_CARGO_LOG="$case_dir/cargo.log" \
+            FAKE_CARGO_LOG="$case_dir/cargo.log" FAKE_COSIGN_LOG="$case_dir/cosign.log" \
               bash "${install_script[0]}" >"$case_dir/output.log" 2>&1
             status=$?
             set -e
 
-            if [ "$mode" = "untrusted" ]; then
+            case "$mode" in
+            extra-key)
               [ "$status" -ne 0 ]
-              grep -F "valid signature from an untrusted signer" "$case_dir/output.log"
+              grep -F "valid signature from an untrusted primary signer" "$case_dir/output.log"
               [ ! -s "$case_dir/cargo.log" ]
               return
-            fi
+              ;;
+            zero-validsig|multiple-validsig)
+              [ "$status" -ne 0 ]
+              grep -F "did not report exactly one valid primary signing fingerprint" "$case_dir/output.log"
+              [ ! -s "$case_dir/cargo.log" ]
+              return
+              ;;
+            invalid-signature)
+              [ "$status" -ne 0 ]
+              grep -F "is not signed by a trusted key" "$case_dir/output.log"
+              [ ! -s "$case_dir/cargo.log" ]
+              return
+              ;;
+            esac
 
             [ "$status" -eq 0 ]
             grep -F "verify-commit --raw $CLI_REF" "$case_dir/git.log"
             grep -F -- "--rev $CLI_REF" "$case_dir/cargo.log"
+            if [ "$mode" = "wrong-workflow-sha" ]; then
+              grep -Fx -- '--certificate-github-workflow-sha' "$case_dir/cosign.log"
+              grep -Fx -- "$CLI_REF" "$case_dir/cosign.log"
+            fi
             if [ "$mode" = "missing" ]; then
               grep -F "no prebuilt artifact (or signature)" "$case_dir/output.log"
             else
@@ -448,58 +509,96 @@ jobs:
 
           run_case missing
           run_case tampered
-          run_case untrusted
+          run_case wrong-workflow-sha
+          run_case primary-key
+          run_case trusted-subkey
+          run_case extra-key
+          run_case zero-validsig
+          run_case multiple-validsig
+          run_case invalid-signature
 
   commit-signature-verification:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - name: Signed postil-cli commit verifies
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Extract production install script
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import yaml
+
+          with open("action.yml") as source:
+              action = yaml.safe_load(source)
+
+          install_steps = [
+              step for step in action["runs"]["steps"]
+              if step.get("name") == "Install postil"
+          ]
+          if len(install_steps) != 1:
+              raise SystemExit("expected exactly one Install postil step")
+          path = os.path.join(os.environ["RUNNER_TEMP"], "install-postil.sh")
+          with open(path, "w") as output:
+              output.write(install_steps[0]["run"])
+          PY
+
+      - name: Signed postil-cli source fallback verifies with production policy
         env:
-          CLI_REF: f0228748d00cc5713b02994793826fe4acdaf91f
+          CLI_REF: 3c5a1b8a0f24a0d71d342b44c6ce64c638830da6 # postil-cli v0.6.2
         run: |
           set -euo pipefail
           export GNUPGHOME="$RUNNER_TEMP/postil-gnupg"
           install -m 700 -d "$GNUPGHOME"
-          curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 https://github.com/web-flow.gpg | gpg --batch --import
+          maintainer_key="$RUNNER_TEMP/morgaesis.gpg"
+          web_flow_key="$RUNNER_TEMP/web-flow.gpg"
+          curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 \
+            https://github.com/morgaesis.gpg -o "$maintainer_key"
+          curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 \
+            https://github.com/web-flow.gpg -o "$web_flow_key"
 
-          verify_repo="$RUNNER_TEMP/postil-cli-signature"
-          rm -rf "$verify_repo"
-          git init -q "$verify_repo"
-          git -C "$verify_repo" fetch --quiet --depth=1 https://github.com/postil-dev/postil-cli "$CLI_REF"
-          git -C "$verify_repo" verify-commit "$CLI_REF"
+          maintainer_fingerprints=$(gpg --batch --with-colons \
+            --import-options show-only --import "$maintainer_key" \
+            | awk -F: '$1 == "fpr" { print $10 }')
+          web_flow_fingerprints=$(gpg --batch --with-colons \
+            --import-options show-only --import "$web_flow_key" \
+            | awk -F: '$1 == "fpr" { print $10 }')
+          grep -Fx '02E45A9532C85D4432AA048151A8809EA950397A' \
+            <<<"$maintainer_fingerprints"
+          grep -Fx '968479A1AFF927E37D1A566BB5690EEEBB952194' \
+            <<<"$web_flow_fingerprints"
+          gpg --batch --import "$maintainer_key" "$web_flow_key"
 
-      - name: Unsigned commit fails with clear error
-        run: |
+          fake_bin="$RUNNER_TEMP/signature-cargo-bin"
+          cargo_log="$RUNNER_TEMP/signature-cargo.log"
+          github_path="$RUNNER_TEMP/signature-github-path"
+          mkdir -p "$fake_bin"
+          : >"$cargo_log"
+          : >"$github_path"
+          cat >"$fake_bin/cargo" <<'SH'
+          #!/usr/bin/env bash
           set -euo pipefail
-          unsigned_repo="$RUNNER_TEMP/unsigned-source"
-          git init -q "$unsigned_repo"
-          git -C "$unsigned_repo" config user.name "Unsigned Commit"
-          git -C "$unsigned_repo" config user.email "unsigned@example.invalid"
-          git -C "$unsigned_repo" -c commit.gpgsign=false commit --quiet --allow-empty -m "unsigned fixture"
-          CLI_REF="$(git -C "$unsigned_repo" rev-parse HEAD)"
+          printf '%s\n' "$*" >>"$FAKE_CARGO_LOG"
+          root=""
+          previous=""
+          for argument in "$@"; do
+            if [ "$previous" = "--root" ]; then root="$argument"; fi
+            previous="$argument"
+          done
+          mkdir -p "$root/bin"
+          cat >"$root/bin/postil" <<'BIN'
+          #!/usr/bin/env bash
+          printf 'postil signature-test\n'
+          BIN
+          chmod +x "$root/bin/postil"
+          SH
+          chmod +x "$fake_bin/cargo"
 
-          verify_repo="$RUNNER_TEMP/unsigned-signature"
-          rm -rf "$verify_repo"
-          git init -q "$verify_repo"
-          git -C "$verify_repo" fetch --quiet --depth=1 "$unsigned_repo" "$CLI_REF"
-
-          log="$RUNNER_TEMP/unsigned-verify.log"
-          set +e
-          (
-            if ! git -C "$verify_repo" verify-commit "$CLI_REF"; then
-              echo "::error::postil-cli commit $CLI_REF is not signed by a trusted key, or git cannot access the signer's public key. Import the signer's public key before using source builds."
-              exit 42
-            fi
-          ) >"$log" 2>&1
-          status=$?
-          set -e
-
-          if [ "$status" -ne 42 ]; then
-            cat "$log"
-            echo "::error::unsigned commit verification exited with status $status, expected 42"
-            exit 1
-          fi
-          grep -F "is not signed by a trusted key, or git cannot access the signer's public key" "$log"
+          PATH="$fake_bin:$PATH" GITHUB_PATH="$github_path" \
+          CLI_RELEASE='' GH_TOKEN='' POSTIL_TARGET='' FAKE_CARGO_LOG="$cargo_log" \
+            bash "$RUNNER_TEMP/install-postil.sh"
+          grep -F -- "--rev $CLI_REF" "$cargo_log"
 
   # The action has three composite steps: "Validate inputs", "Install
   # postil" (fetch + cosign-verify the pinned CLI, or build from source),
@@ -564,6 +663,7 @@ jobs:
             --signature "$DEST/postil.tar.gz.sig" \
             --certificate "$DEST/postil.tar.gz.pem" \
             --certificate-identity "https://github.com/postil-dev/postil-cli/.github/workflows/release.yml@refs/tags/$CLI_RELEASE" \
+            --certificate-github-workflow-sha "$CLI_REF" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
           tar -xzf "$DEST/postil.tar.gz" -C "$DEST"
