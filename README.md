@@ -39,7 +39,7 @@ Set the `POSTIL_REVIEW_MODEL` repository variable to a model qualified for your 
 | --- | --- | --- |
 | `cli-ref` | yes | Full 40-character `postil-cli` commit SHA |
 | `api-key` | yes | Model provider credential |
-| `cli-release` | no | Matching signed release tag for a prebuilt Linux binary |
+| `cli-release` | no | Matching signed release tag for a prebuilt Linux or macOS binary |
 | `api-base` | no | Model endpoint, defaulting to the CLI provider endpoint |
 | `api-format` | no | `openai-compatible` or `anthropic` |
 | `endpoint-auth-header`, `endpoint-auth-value` | no | Paired additional private-gateway authentication |

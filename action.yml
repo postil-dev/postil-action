@@ -169,6 +169,11 @@ runs:
             x86_64) target="x86_64-unknown-linux-$libc" ;;
             aarch64|arm64) target="aarch64-unknown-linux-$libc" ;;
           esac
+        elif [ "$RUNNER_OS" = "macOS" ]; then
+          case "$(uname -m)" in
+            x86_64) target="x86_64-apple-darwin" ;;
+            arm64) target="aarch64-apple-darwin" ;;
+          esac
         fi
 
         if [ -n "$target" ]; then
@@ -205,8 +210,6 @@ runs:
           rm -f "$auth_cfg"
           trap - EXIT
           if [ "$tag_sha" = "$CLI_REF" ]; then
-            # Prebuilt artifacts are Linux-only here; other runners fall back
-            # to the source build rather than fetching a binary that cannot run.
             target="$POSTIL_TARGET"
             if [ -n "$target" ]; then
               base="https://github.com/postil-dev/postil-cli/releases/download/$CLI_RELEASE"
@@ -215,7 +218,11 @@ runs:
                  && curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz.sig" "$base/postil-$target.tar.gz.sig" \
                  && curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz.pem" "$base/postil-$target.tar.gz.pem"; then
                 expected=$(awk '{print $1}' "$DEST/postil.tar.gz.sha256")
-                actual=$(sha256sum "$DEST/postil.tar.gz" | awk '{print $1}')
+                if command -v sha256sum >/dev/null 2>&1; then
+                  actual=$(sha256sum "$DEST/postil.tar.gz" | awk '{print $1}')
+                else
+                  actual=$(shasum -a 256 "$DEST/postil.tar.gz" | awk '{print $1}')
+                fi
                 # Checksum guards against transit corruption; the checksum file
                 # sits next to the artifact on the same release, so it alone
                 # cannot prove the release wasn't tampered with. The Sigstore

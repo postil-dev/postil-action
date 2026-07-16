@@ -149,6 +149,36 @@ jobs:
                   output.write(script if script.endswith("\n") else script + "\n")
           PY
 
+      - name: Select prebuilt targets across supported runners
+        run: |
+          set -euo pipefail
+          target_script=("$RUNNER_TEMP"/action-scripts/*-Select-postil-target.sh)
+          [ "${#target_script[@]}" -eq 1 ]
+          fake_bin="$RUNNER_TEMP/fake-target-bin"
+          mkdir -p "$fake_bin"
+          cat >"$fake_bin/uname" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          printf '%s\n' "$FIXTURE_ARCH"
+          SH
+          chmod +x "$fake_bin/uname"
+
+          run_case() {
+            runner_os="$1"
+            architecture="$2"
+            expected="$3"
+            output="$RUNNER_TEMP/target-$runner_os-$architecture.txt"
+            PATH="$fake_bin:$PATH" FIXTURE_ARCH="$architecture" \
+              RUNNER_OS="$runner_os" GITHUB_OUTPUT="$output" \
+              bash "${target_script[0]}"
+            grep -Fx "target=$expected" "$output"
+          }
+
+          run_case Linux x86_64 x86_64-unknown-linux-gnu
+          run_case Linux arm64 aarch64-unknown-linux-gnu
+          run_case macOS x86_64 x86_64-apple-darwin
+          run_case macOS arm64 aarch64-apple-darwin
+
       - name: Reject invalid provider input without exposing credentials
         run: |
           set -euo pipefail
@@ -630,6 +660,10 @@ jobs:
             runner: ubuntu-24.04-arm
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
@@ -655,7 +689,11 @@ jobs:
           curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz.pem" "$base/postil-$TARGET.tar.gz.pem"
 
           expected=$(awk '{print $1}' "$DEST/postil.tar.gz.sha256")
-          actual=$(sha256sum "$DEST/postil.tar.gz" | awk '{print $1}')
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual=$(sha256sum "$DEST/postil.tar.gz" | awk '{print $1}')
+          else
+            actual=$(shasum -a 256 "$DEST/postil.tar.gz" | awk '{print $1}')
+          fi
           [ "$expected" = "$actual" ]
 
           cosign verify-blob \
