@@ -23,10 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: postil-dev/postil-action@77a3349f41799facba618371fb19726d163ba520
+      - uses: postil-dev/postil-action@00442e2340edaa4a681955dbb25e20650ca1514c
         with:
-          cli-ref: 3c5a1b8a0f24a0d71d342b44c6ce64c638830da6
-          cli-release: v0.6.2
+          cli-ref: 1dd3d82cbb2832851085045e21ecec6e937847fd
+          cli-release: v0.6.3
           api-key: ${{ secrets.OPENROUTER_API_KEY }}
           model: ${{ vars.POSTIL_REVIEW_MODEL }}
 ```
