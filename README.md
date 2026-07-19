@@ -25,8 +25,8 @@ jobs:
     steps:
       - uses: postil-dev/postil-action@00442e2340edaa4a681955dbb25e20650ca1514c
         with:
-          cli-ref: fbbe0891bc302a7644c6fb2232ee5f4af587894b
-          cli-release: v0.7.1
+          cli-ref: dcf4e34c4804d4bf64705ab6367c883cea23b33a
+          cli-release: v0.7.2
           api-key: ${{ secrets.OPENROUTER_API_KEY }}
           model: ${{ vars.POSTIL_REVIEW_MODEL }}
 ```
@@ -56,7 +56,7 @@ Set the `POSTIL_REVIEW_MODEL` repository variable to a model qualified for your 
 
 Outputs are `envelope-path`, `gate-failing`, and `sarif-path`.
 
-The action does not select an unverified fallback model. Set `model` to a model qualified for your review profile, or provide trusted configuration with `config`. If resolution produces no model, Postil fails before contacting a provider. `envelope-path` points to the complete CLI envelope, including `reviewCoverage` when the review uses bounded source selection.
+The action does not select an unverified fallback model. Set `model` to a model qualified for your review profile, or provide trusted configuration with `config`. If resolution produces no model, Postil fails before contacting a provider. Reviews cover up to five selected source batches. `envelope-path` preserves the complete CLI envelope, including `reviewCoverage`.
 
 For the native Anthropic Messages API, set `api-format: anthropic` and its API base. Private gateways can use `endpoint-auth-header` and `endpoint-auth-value` for one additional credential; set both or neither. Set `allow-private-api-base: true` only for an endpoint whose network boundary you trust.
 

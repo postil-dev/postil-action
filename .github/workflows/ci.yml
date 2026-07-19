@@ -59,6 +59,15 @@ jobs:
                   if "run" in step and "shell" not in step:
                       errors.append(f"steps[{i}] has 'run' but no 'shell'")
 
+          review_steps = [step for step in (steps or []) if step.get("name") == "Review"]
+          if len(review_steps) != 1:
+              errors.append("runs.steps must contain exactly one Review step")
+          else:
+              review_script = review_steps[0].get("run", "")
+              for argument in ("--publish", "--bounded", "--sha", "--base-sha", "--output-json"):
+                  if argument not in review_script:
+                      errors.append(f"Review step must pass {argument}")
+
           for name, spec in (doc.get("inputs") or {}).items():
               if spec.get("required") and "default" in spec:
                   errors.append(f"input '{name}' is required but also sets a default")
@@ -276,6 +285,7 @@ jobs:
           envelope_path=$(awk -F= '$1 == "envelope-path" { print substr($0, index($0, "=") + 1) }' "$output")
           cmp "$fixture" "$envelope_path"
           jq -e '.reviewCoverage == {mode:"bounded",selectedBatches:5,totalBatches:17,plannerFallback:true,nested:{retained:[1,2,3]}}' "$envelope_path"
+          grep -Fx -- '--publish' "$args_log"
           grep -Fx -- '--bounded' "$args_log"
 
           config_temp="$RUNNER_TEMP/review-config"
@@ -294,6 +304,7 @@ jobs:
           INPUT_SOFT_FAIL=false INPUT_SARIF_PATH='' EVENT_PR='' \
           FIXTURE_ENVELOPE="$fixture" ARGS_LOG="$config_args" \
             bash "${review_script[0]}"
+          grep -Fx -- '--publish' "$config_args"
           grep -Fx -- '--bounded' "$config_args"
           grep -Fx -- '--config' "$config_args"
           grep -Fx -- 'postil.toml' "$config_args"
@@ -366,6 +377,49 @@ jobs:
           set -e
           [ "$status" -eq 2 ]
           grep -F "postil review did not complete (exit 2)" "$no_model_log"
+
+      - name: Bind event reviews to the triggering snapshot
+        run: |
+          set -euo pipefail
+          review_script=("$RUNNER_TEMP"/action-scripts/*-Review.sh)
+          [ "${#review_script[@]}" -eq 1 ]
+          fake_bin="$RUNNER_TEMP/fake-review-bin"
+          fixture="$RUNNER_TEMP/envelope-fixture.json"
+
+          run_review() {
+            case_name="$1"
+            input_pr="$2"
+            args_log="$RUNNER_TEMP/$case_name-args.txt"
+            case_output="$RUNNER_TEMP/$case_name-outputs.txt"
+            case_temp="$RUNNER_TEMP/$case_name"
+            mkdir -p "$case_temp"
+            PATH="$fake_bin:$PATH" \
+            RUNNER_TEMP="$case_temp" GITHUB_OUTPUT="$case_output" \
+            GITHUB_REPOSITORY=postil-dev/postil-action GITHUB_TOKEN=test-token \
+            POSTIL_API_KEY=test-key POSTIL_API_BASE=https://provider.example/v1 \
+            POSTIL_API_FORMAT=anthropic POSTIL_ENDPOINT_AUTH_HEADER=X-Gateway-Token \
+            POSTIL_ENDPOINT_AUTH_VALUE=private-endpoint-secret \
+            POSTIL_ALLOW_PRIVATE_API_BASE=true REVIEW_MODEL=qualified/model \
+            REVIEW_MODEL_CASCADE='' INPUT_PR="$input_pr" INPUT_FAIL_ON='' INPUT_CONFIG='' \
+            INPUT_SINCE_SHA='' INPUT_BASELINE='' INPUT_SOFT_FAIL=false \
+            INPUT_SARIF_PATH='' EVENT_PR=7 EVENT_HEAD_SHA=head-from-event \
+            EVENT_BASE_SHA=base-from-event FIXTURE_ENVELOPE="$fixture" ARGS_LOG="$args_log" \
+              bash "${review_script[0]}"
+          }
+
+          run_review event-snapshot ''
+          snapshot_args="$RUNNER_TEMP/event-snapshot-args.txt"
+          grep -Fx -- '--sha' "$snapshot_args"
+          grep -Fx -- 'head-from-event' "$snapshot_args"
+          grep -Fx -- '--base-sha' "$snapshot_args"
+          grep -Fx -- 'base-from-event' "$snapshot_args"
+
+          run_review explicit-pr 8
+          explicit_args="$RUNNER_TEMP/explicit-pr-args.txt"
+          if grep -Fx -- '--sha' "$explicit_args" || grep -Fx -- '--base-sha' "$explicit_args"; then
+            echo "::error::explicit non-event PR inherited the event snapshot"
+            exit 1
+          fi
 
       - name: Fall back safely for missing or tampered release bundles
         run: |
@@ -494,7 +548,7 @@ jobs:
             : >"$case_dir/cosign.log"
             set +e
             PATH="$fake_bin:$PATH" RUNNER_TEMP="$case_dir/temp" RUNNER_OS=Linux \
-            GITHUB_PATH="$case_dir/github-path" CLI_REF="$CLI_REF" CLI_RELEASE=v0.6.2 \
+            GITHUB_PATH="$case_dir/github-path" CLI_REF="$CLI_REF" CLI_RELEASE=v0.7.2 \
             GH_TOKEN=test-token POSTIL_TARGET=x86_64-unknown-linux-gnu \
             RELEASE_TEST_MODE="$mode" FAKE_GIT_LOG="$case_dir/git.log" \
             FAKE_CARGO_LOG="$case_dir/cargo.log" FAKE_COSIGN_LOG="$case_dir/cosign.log" \
@@ -576,7 +630,7 @@ jobs:
 
       - name: Signed postil-cli source fallback verifies with production policy
         env:
-          CLI_REF: 3c5a1b8a0f24a0d71d342b44c6ce64c638830da6 # postil-cli v0.6.2
+          CLI_REF: dcf4e34c4804d4bf64705ab6367c883cea23b33a # postil-cli v0.7.2
         run: |
           set -euo pipefail
           export GNUPGHOME="$RUNNER_TEMP/postil-gnupg"
@@ -654,24 +708,31 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
+            sha256: e3aa51d0147c40281aadf533610f45b7ede3070911d52be723e70b04360935aa
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
+            sha256: 5e710bf3cec119cfc0d9a6381075e993155eca8eecfa0573e8301a7b194b85fe
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
+            sha256: 1387159dffc5237e141b62bd16ff30b8a125a2f5ca6f1318d66d6fcb25ee20a4
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
+            sha256: 80c23018f8988b7cf9bb16a3c0e3ae86d64bc90fcd2bc28ce3c39694948568fb
           - target: x86_64-apple-darwin
             runner: macos-15-intel
+            sha256: 4d4e05498eb370b8c83668bad927216c264e2383977e7c1d045281add4a79a3b
           - target: aarch64-apple-darwin
             runner: macos-15
+            sha256: 7ceb39a59d60c63fb4df1f6918180d0486fba81f728206a89a28693b13d670b9
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: Fetch, cosign-verify, and smoke test the pinned CLI release
         env:
-          CLI_REF: 3c5a1b8a0f24a0d71d342b44c6ce64c638830da6 # postil-cli v0.6.2
-          CLI_RELEASE: v0.6.2
-          EXPECTED_VERSION: postil 0.6.2
+          CLI_REF: dcf4e34c4804d4bf64705ab6367c883cea23b33a # postil-cli v0.7.2
+          CLI_RELEASE: v0.7.2
+          EXPECTED_VERSION: postil 0.7.2
+          EXPECTED_SHA256: ${{ matrix.sha256 }}
           TARGET: ${{ matrix.target }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -688,6 +749,8 @@ jobs:
           curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz.sig" "$base/postil-$TARGET.tar.gz.sig"
           curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 -o "$DEST/postil.tar.gz.pem" "$base/postil-$TARGET.tar.gz.pem"
 
+          checksum_line=$(cat "$DEST/postil.tar.gz.sha256")
+          [ "$checksum_line" = "$EXPECTED_SHA256  postil-$TARGET.tar.gz" ]
           expected=$(awk '{print $1}' "$DEST/postil.tar.gz.sha256")
           if command -v sha256sum >/dev/null 2>&1; then
             actual=$(sha256sum "$DEST/postil.tar.gz" | awk '{print $1}')
@@ -744,5 +807,5 @@ jobs:
 
           # Boundary: this is as far as the smoke test goes. The action's
           # "Review" step, deliberately not exercised here, takes it from
-          # here to `postil review --repo ... --pr ...`, which needs a real
+          # here to `postil review --publish --bounded --repo ... --pr ...`, which needs a real
           # PR and a working model API key.
