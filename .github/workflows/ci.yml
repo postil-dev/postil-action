@@ -255,7 +255,7 @@ jobs:
           fi
           [ "${POSTIL_API_FORMAT:-}" = "anthropic" ]
           [ "${POSTIL_ENDPOINT_AUTH_HEADER:-}" = "X-Gateway-Token" ]
-          [ "${POSTIL_ENDPOINT_AUTH_VALUE:-}" = "private-endpoint-secret" ]
+          [ "${POSTIL_ENDPOINT_AUTH_VALUE:-}" = "fixture-gateway-value" ]
           [ "${POSTIL_ALLOW_PRIVATE_API_BASE:-}" = "true" ]
           cat "$FIXTURE_ENVELOPE"
           exit "${FIXTURE_EXIT:-0}"
@@ -276,7 +276,7 @@ jobs:
           GITHUB_REPOSITORY=postil-dev/postil-action GITHUB_TOKEN=test-token \
           POSTIL_API_KEY=test-key POSTIL_API_BASE=https://provider.example/v1 \
           POSTIL_API_FORMAT=anthropic POSTIL_ENDPOINT_AUTH_HEADER=X-Gateway-Token \
-          POSTIL_ENDPOINT_AUTH_VALUE=private-endpoint-secret \
+          POSTIL_ENDPOINT_AUTH_VALUE=fixture-gateway-value \
           POSTIL_ALLOW_PRIVATE_API_BASE=true REVIEW_MODEL=qualified/model \
           REVIEW_MODEL_CASCADE='' INPUT_PR=7 INPUT_FAIL_ON='' INPUT_CONFIG='' \
           INPUT_SINCE_SHA='' INPUT_BASELINE='' INPUT_SOFT_FAIL=false \
@@ -297,7 +297,7 @@ jobs:
           GITHUB_REPOSITORY=postil-dev/postil-action GITHUB_TOKEN=test-token \
           POSTIL_API_KEY=test-key POSTIL_API_BASE=https://provider.example/v1 \
           POSTIL_API_FORMAT=anthropic POSTIL_ENDPOINT_AUTH_HEADER=X-Gateway-Token \
-          POSTIL_ENDPOINT_AUTH_VALUE=private-endpoint-secret \
+          POSTIL_ENDPOINT_AUTH_VALUE=fixture-gateway-value \
           POSTIL_ALLOW_PRIVATE_API_BASE=true REVIEW_MODEL='' \
           REVIEW_MODEL_CASCADE='' INPUT_PR=7 INPUT_FAIL_ON='' \
           INPUT_CONFIG=postil.toml INPUT_SINCE_SHA='' INPUT_BASELINE='' \
@@ -325,7 +325,7 @@ jobs:
             GITHUB_REPOSITORY=postil-dev/postil-action GITHUB_TOKEN=test-token \
             POSTIL_API_KEY=test-key POSTIL_API_BASE=https://provider.example/v1 \
             POSTIL_API_FORMAT=anthropic POSTIL_ENDPOINT_AUTH_HEADER=X-Gateway-Token \
-            POSTIL_ENDPOINT_AUTH_VALUE=private-endpoint-secret \
+            POSTIL_ENDPOINT_AUTH_VALUE=fixture-gateway-value \
             POSTIL_ALLOW_PRIVATE_API_BASE=true REVIEW_MODEL=qualified/model \
             REVIEW_MODEL_CASCADE='' INPUT_PR=7 INPUT_FAIL_ON='' INPUT_CONFIG='' \
             INPUT_SINCE_SHA='' INPUT_BASELINE='' INPUT_SOFT_FAIL=false \
@@ -398,7 +398,7 @@ jobs:
             GITHUB_REPOSITORY=postil-dev/postil-action GITHUB_TOKEN=test-token \
             POSTIL_API_KEY=test-key POSTIL_API_BASE=https://provider.example/v1 \
             POSTIL_API_FORMAT=anthropic POSTIL_ENDPOINT_AUTH_HEADER=X-Gateway-Token \
-            POSTIL_ENDPOINT_AUTH_VALUE=private-endpoint-secret \
+            POSTIL_ENDPOINT_AUTH_VALUE=fixture-gateway-value \
             POSTIL_ALLOW_PRIVATE_API_BASE=true REVIEW_MODEL=qualified/model \
             REVIEW_MODEL_CASCADE='' INPUT_PR="$input_pr" INPUT_FAIL_ON='' INPUT_CONFIG='' \
             INPUT_SINCE_SHA='' INPUT_BASELINE='' INPUT_SOFT_FAIL=false \
