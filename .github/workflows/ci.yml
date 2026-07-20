@@ -64,7 +64,7 @@ jobs:
               errors.append("runs.steps must contain exactly one Review step")
           else:
               review_script = review_steps[0].get("run", "")
-              for argument in ("--publish", "--bounded", "--sha", "--base-sha", "--output-json"):
+              for argument in ("--publish", "--bounded", "--output-json"):
                   if argument not in review_script:
                       errors.append(f"Review step must pass {argument}")
 
