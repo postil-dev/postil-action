@@ -327,6 +327,8 @@ runs:
         INPUT_SOFT_FAIL: ${{ inputs.soft-fail }}
         INPUT_SARIF_PATH: ${{ inputs.sarif-path }}
         EVENT_PR: ${{ github.event.pull_request.number }}
+        EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       run: |
         set -euo pipefail
         # A set-but-empty key must not shadow a job-level OPENROUTER_API_KEY.
@@ -337,7 +339,10 @@ runs:
           exit 1
         fi
         ENVELOPE="$RUNNER_TEMP/postil-envelope.json"
-        args=(review --bounded --repo "$GITHUB_REPOSITORY" --pr "$PR" --output-json)
+        args=(review --publish --bounded --repo "$GITHUB_REPOSITORY" --pr "$PR" --output-json)
+        if [ "$PR" = "${EVENT_PR:-}" ] && [ -n "${EVENT_HEAD_SHA:-}" ] && [ -n "${EVENT_BASE_SHA:-}" ]; then
+          args+=(--sha "$EVENT_HEAD_SHA" --base-sha "$EVENT_BASE_SHA")
+        fi
         [ -n "$INPUT_FAIL_ON" ]   && args+=(--fail-on "$INPUT_FAIL_ON")
         [ -n "$INPUT_CONFIG" ]    && args+=(--config "$INPUT_CONFIG")
         [ -n "$INPUT_SINCE_SHA" ] && args+=(--since-sha "$INPUT_SINCE_SHA")
